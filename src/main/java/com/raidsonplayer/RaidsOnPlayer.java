@@ -1,0 +1,102 @@
+package com.raidsonplayer;
+
+import com.mojang.brigadier.arguments.IntegerArgumentType;
+import com.mojang.logging.LogUtils;
+import com.raidsonplayer.RaidData.Base;
+import com.raidsonplayer.RaidData.Squad;
+import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.commands.Commands;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.network.chat.Component;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.MobCategory;
+import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.minecraft.world.entity.monster.Pillager;
+import net.neoforged.bus.api.IEventBus;
+import net.neoforged.fml.ModContainer;
+import net.neoforged.fml.common.Mod;
+import net.neoforged.fml.config.ModConfig;
+import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.event.RegisterCommandsEvent;
+import net.neoforged.neoforge.event.entity.EntityAttributeCreationEvent;
+import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
+import net.neoforged.neoforge.event.entity.player.AdvancementEvent;
+import net.neoforged.neoforge.event.tick.ServerTickEvent;
+import net.neoforged.neoforge.registries.DeferredHolder;
+import net.neoforged.neoforge.registries.DeferredRegister;
+import org.slf4j.Logger;
+
+@Mod(RaidsOnPlayer.MODID)
+public class RaidsOnPlayer {
+    public static final String MODID = "raidsonplayer";
+    public static final Logger LOG = LogUtils.getLogger();
+
+    static final DeferredRegister<EntityType<?>> ENTITIES = DeferredRegister.create(Registries.ENTITY_TYPE, MODID);
+    public static final DeferredHolder<EntityType<?>, EntityType<RaiderEntity>> RAIDER = ENTITIES.register("raider",
+            () -> EntityType.Builder.<RaiderEntity>of(RaiderEntity::new, MobCategory.MONSTER)
+                    .sized(0.6F, 1.95F).passengerAttachments(2.0F).ridingOffset(-0.6F).clientTrackingRange(8).build("raider"));
+
+    public RaidsOnPlayer(IEventBus modBus, ModContainer container) {
+        ENTITIES.register(modBus);
+        // Player-like stats: 20 health, fists do 1, so the weapon decides (stone sword = 5, like a player's).
+        modBus.addListener((EntityAttributeCreationEvent e) -> e.put(RAIDER.get(), Pillager.createAttributes()
+                .add(Attributes.MAX_HEALTH, 20.0).add(Attributes.ATTACK_DAMAGE, 1.0).build()));
+        container.registerConfig(ModConfig.Type.COMMON, Config.SPEC);
+
+        NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post e) -> RaidManager.tick(e.getServer()));
+        NeoForge.EVENT_BUS.addListener((AdvancementEvent.AdvancementEarnEvent e) -> {
+            if (e.getEntity() instanceof ServerPlayer p) RaidManager.updateStage(p.server, RaidData.get(p.server));
+        });
+        NeoForge.EVENT_BUS.addListener((LivingDeathEvent e) -> {
+            if (e.getEntity() instanceof RaiderEntity r) RaidManager.onDeath(r);
+        });
+        NeoForge.EVENT_BUS.addListener(RaidsOnPlayer::commands);
+    }
+
+    /** /rop info | stage <n> | raid | rebuild  (ops only; for server admins and testing) */
+    static void commands(RegisterCommandsEvent e) {
+        e.getDispatcher().register(Commands.literal("rop").requires(s -> s.hasPermission(2))
+                .then(Commands.literal("info").executes(c -> info(c.getSource())))
+                .then(Commands.literal("stage").then(Commands.argument("n", IntegerArgumentType.integer(1, 4)).executes(c -> {
+                    RaidManager.setStage(c.getSource().getServer(), data(c.getSource()), IntegerArgumentType.getInteger(c, "n"));
+                    return 1;
+                })))
+                .then(Commands.literal("raid").executes(c -> {
+                    Base b = RaidManager.baseOf(data(c.getSource()), c.getSource().getPlayerOrException());
+                    if (b == null) { c.getSource().sendFailure(Component.literal("You have no base (set a bed in the overworld).")); return 0; }
+                    b.nextRaid = 0;
+                    c.getSource().sendSuccess(() -> Component.literal("Raid due now (starts if the camp has 2+ raiders and you are within 128 blocks of home)."), false);
+                    return 1;
+                }))
+                .then(Commands.literal("rebuild").executes(c -> {
+                    Base b = RaidManager.baseOf(data(c.getSource()), c.getSource().getPlayerOrException());
+                    if (b == null || b.camp == null) { c.getSource().sendFailure(Component.literal("No camp yet.")); return 0; }
+                    RaidManager.rebuild(c.getSource().getServer().overworld(), data(c.getSource()), b);
+                    c.getSource().sendSuccess(() -> Component.literal("Camp rebuilt."), false);
+                    return 1;
+                })));
+    }
+
+    static RaidData data(CommandSourceStack s) { return RaidData.get(s.getServer()); }
+
+    static int info(CommandSourceStack src) {
+        RaidData d = data(src);
+        ServerLevel level = src.getServer().overworld();
+        StringBuilder sb = new StringBuilder("Stage " + d.stage + ", " + d.bases.size() + " base(s)");
+        for (Base b : d.bases.values()) {
+            sb.append("\n- home ").append(b.home.toShortString()).append(" members ").append(b.members.size())
+                    .append(" camp ").append(b.camp == null ? "none" : b.camp.toShortString() + " (stage " + b.campStage + ")")
+                    .append(" next raid in ").append(Math.max(0, b.nextRaid - level.getGameTime()) / 1200).append(" min");
+            for (Squad s : d.squads.values())
+                if (s.base.equals(b.id))
+                    sb.append("\n    ").append(s.state).append(" x").append(s.count).append(" at ")
+                            .append((int) s.pos.x).append(' ').append((int) s.pos.y).append(' ').append((int) s.pos.z)
+                            .append(s.live.isEmpty() ? " (virtual)" : " (" + s.live.size() + " spawned)")
+                            .append(s.loot.isEmpty() ? "" : " carrying " + s.loot.size() + " stacks");
+        }
+        src.sendSuccess(() -> Component.literal(sb.toString()), false);
+        return 1;
+    }
+}

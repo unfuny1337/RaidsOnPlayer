@@ -186,7 +186,8 @@ public final class RaidManager {
         for (int i = 0; i < 12; i++) {
             double a = level.random.nextDouble() * Math.PI * 2, r = Mth.nextDouble(level.random, min, max);
             int x = b.home.getX() + (int) (Math.cos(a) * r), z = b.home.getZ() + (int) (Math.sin(a) * r);
-            if (d.bases.values().stream().anyMatch(o -> o.home.distToCenterSqr(x, o.home.getY(), z) < (double) min * min)) continue;
+            // not near another player's home (its own home is skipped: rounding puts a site at exactly `min` just inside it)
+            if (d.bases.values().stream().anyMatch(o -> o != b && o.home.distToCenterSqr(x, o.home.getY(), z) < (double) min * min)) continue;
             BlockPos c = CampBuilder.trySite(level, x, z);
             if (c == null) continue;
             b.camp = c;

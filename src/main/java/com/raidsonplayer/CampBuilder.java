@@ -8,6 +8,7 @@ import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.BiomeTags;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.Container;
 import net.minecraft.world.item.ItemStack;
@@ -26,7 +27,9 @@ import net.minecraft.world.phys.Vec3;
 import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Builds raider bases in code. Stage 1 = two tents (concept.png). Stages 2-4 = the outpost (concept2.png): walls, four corner
@@ -62,15 +65,47 @@ public final class CampBuilder {
 
     /** Builds the base for a stage, gate facing `front`, and fills its chests. Clears the footprint first (also used for rebuilds). */
     static Layout build(ServerLevel level, BlockPos c, int stage, int clearRadius, Direction front, RandomSource r) {
-        int radius = stage == 1 ? 9 : 24;
-        flatten(level, c, Math.max(radius, clearRadius), stage == 1 ? 10 : 18);
-        Layout l = stage == 1 ? tents(level, c, r) : outpost(level, c, stage, front, r);
+        int radius = Math.max(stage == 1 ? 9 : 24, clearRadius);
+        Ground g = ground(level, c, radius + 4); // read before flattening, from terrain the build never touches (also on rebuilds)
+        flatten(level, c, radius, stage == 1 ? 10 : 18, g);
+        Layout l = stage == 1 ? tents(level, c, r) : outpost(level, c, stage, front, g, r);
+        snow(level, c, radius);
         fillLoot(level, l.chests(), stage, r);
         return l;
     }
 
-    /** Levels a disc: clears `height` blocks above the floor, fills dirt below it, grass on top. */
-    static void flatten(ServerLevel level, BlockPos c, int radius, int height) {
+    /** The biome's natural ground: its top block (grass, sand, podzol, snow...) and the block under it. */
+    record Ground(BlockState top, BlockState under) {}
+
+    /** Reads the ground from the most common surface blocks on a ring around c, so it works for modded biomes too. */
+    static Ground ground(ServerLevel level, BlockPos c, int ring) {
+        Map<Block, Integer> tops = new HashMap<>(), unders = new HashMap<>();
+        for (int i = 0; i < 16; i++) {
+            double a = i * Math.PI / 8;
+            int x = c.getX() + (int) Math.round(Math.cos(a) * ring), z = c.getZ() + (int) Math.round(Math.sin(a) * ring);
+            BlockPos top = new BlockPos(x, surface(level, x, z) - 1, z);
+            if (!natural(level, top)) continue;
+            tops.merge(level.getBlockState(top).getBlock(), 1, Integer::sum);
+            if (natural(level, top.below())) unders.merge(level.getBlockState(top.below()).getBlock(), 1, Integer::sum);
+        }
+        BlockState under = mostCommon(unders, Blocks.DIRT);
+        if (under.getBlock() instanceof FallingBlock) // fill can sit on ponds or caves, so it must not fall: sand -> sandstone
+            under = (under.is(Blocks.RED_SAND) ? Blocks.RED_SANDSTONE : under.is(BlockTags.SAND) ? Blocks.SANDSTONE : Blocks.STONE).defaultBlockState();
+        return new Ground(mostCommon(tops, Blocks.GRASS_BLOCK), under);
+    }
+
+    /** A full terrain block: not fluid, a tree trunk or a block entity (chest, spawner, suspicious sand). */
+    private static boolean natural(ServerLevel level, BlockPos p) {
+        BlockState s = level.getBlockState(p);
+        return s.getFluidState().isEmpty() && !s.is(BlockTags.LOGS) && !s.hasBlockEntity() && s.isCollisionShapeFullBlock(level, p);
+    }
+
+    private static BlockState mostCommon(Map<Block, Integer> counts, Block fallback) {
+        return counts.entrySet().stream().max(Map.Entry.comparingByValue()).map(Map.Entry::getKey).orElse(fallback).defaultBlockState();
+    }
+
+    /** Levels a disc: clears `height` blocks above the floor, fills the biome's under-block below it, its top block on top. */
+    static void flatten(ServerLevel level, BlockPos c, int radius, int height, Ground g) {
         for (int cx = (c.getX() - radius) >> 4; cx <= (c.getX() + radius) >> 4; cx++)
             for (int cz = (c.getZ() - radius) >> 4; cz <= (c.getZ() + radius) >> 4; cz++) level.getChunk(cx, cz);
         BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos();
@@ -80,8 +115,20 @@ public final class CampBuilder {
                 int x = c.getX() + dx, z = c.getZ() + dz;
                 for (int y = c.getY(); y <= c.getY() + height; y++) level.setBlock(p.set(x, y, z), Blocks.AIR.defaultBlockState(), 2);
                 int top = surface(level, x, z);
-                for (int y = Math.min(top, c.getY() - 1); y < c.getY() - 1; y++) level.setBlock(p.set(x, y, z), Blocks.DIRT.defaultBlockState(), 2);
-                level.setBlock(p.set(x, c.getY() - 1, z), Blocks.GRASS_BLOCK.defaultBlockState(), 2);
+                for (int y = Math.min(top, c.getY() - 1); y < c.getY() - 1; y++) level.setBlock(p.set(x, y, z), g.under, 2);
+                level.setBlock(p.set(x, c.getY() - 1, z), g.top, 2);
+            }
+    }
+
+    /** Snow on open ground in cold biomes, where snowfall would put it (vanilla's own rule), not on roofs or walls. */
+    static void snow(ServerLevel level, BlockPos c, int radius) {
+        BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos();
+        for (int dx = -radius; dx <= radius; dx++)
+            for (int dz = -radius; dz <= radius; dz++) {
+                if (dx * dx + dz * dz > radius * radius) continue;
+                p.set(c.getX() + dx, c.getY(), c.getZ() + dz);
+                if (level.getHeight(Heightmap.Types.MOTION_BLOCKING, p.getX(), p.getZ()) == c.getY()
+                        && level.getBiome(p).value().shouldSnow(level, p)) level.setBlock(p, Blocks.SNOW.defaultBlockState(), 3);
             }
     }
 
@@ -117,9 +164,9 @@ public final class CampBuilder {
         level.setBlock(o.north(2), bed.setValue(BedBlock.PART, BedPart.FOOT), 3);
         level.setBlock(o.north(3), bed.setValue(BedBlock.PART, BedPart.HEAD), 3);
         int n = 1 + r.nextInt(2);
-        for (int i = 0; i < n; i++) {
-            BlockPos p = o.offset(-2, 0, 1 + i);
-            level.setBlock(p, Blocks.CHEST.defaultBlockState().setValue(ChestBlock.FACING, Direction.EAST), 3);
+        for (int i = 0; i < n; i++) { // side by side at the front-left corner (concept.png), facing out like the opening
+            BlockPos p = o.offset(-3 - i, 0, 0);
+            level.setBlock(p, Blocks.CHEST.defaultBlockState().setValue(ChestBlock.FACING, Direction.SOUTH), 3);
             chests.add(p);
         }
     }
@@ -165,12 +212,13 @@ public final class CampBuilder {
         return "oak";
     }
 
-    static Palette palette(int stage, String w) {
+    static Palette palette(int stage, String w, Ground g) {
         String mc = "minecraft:";
+        boolean dirt = g.top().is(BlockTags.DIRT); // trodden yard: coarse dirt and paths on grassland, the biome's own ground elsewhere
         return switch (stage) {
             case 2 -> new Palette(block(mc + w + "_log"), block(mc + "stripped_" + w + "_log"), block(mc + w + "_fence"),
-                    block(mc + w + "_planks"), block(mc + w + "_log"), Blocks.COARSE_DIRT.defaultBlockState(),
-                    Blocks.DIRT_PATH.defaultBlockState(), block(mc + w + "_planks"), block(mc + w + "_slab"));
+                    block(mc + w + "_planks"), block(mc + w + "_log"), dirt ? Blocks.COARSE_DIRT.defaultBlockState() : g.top(),
+                    dirt ? Blocks.DIRT_PATH.defaultBlockState() : g.under(), block(mc + w + "_planks"), block(mc + w + "_slab"));
             case 3 -> new Palette(Blocks.COBBLESTONE.defaultBlockState(), Blocks.MOSSY_COBBLESTONE.defaultBlockState(),
                     Blocks.COBBLESTONE_WALL.defaultBlockState(), Blocks.STONE_BRICKS.defaultBlockState(), Blocks.STONE_BRICK_WALL.defaultBlockState(),
                     Blocks.COBBLESTONE.defaultBlockState(), Blocks.GRAVEL.defaultBlockState(), Blocks.COBBLESTONE.defaultBlockState(),
@@ -181,10 +229,10 @@ public final class CampBuilder {
         };
     }
 
-    static Layout outpost(ServerLevel level, BlockPos c, int stage, Direction front, RandomSource r) {
+    static Layout outpost(ServerLevel level, BlockPos c, int stage, Direction front, Ground g, RandomSource r) {
         Canvas k = new Canvas(level, c, rotationTo(front));
         String w = wood(level, c);
-        Palette p = palette(stage, w);
+        Palette p = palette(stage, w, g);
 
         for (int x = -10; x <= 10; x++)
             for (int z = -10; z <= 10; z++) k.set(x, -1, z, r.nextInt(3) == 0 ? p.floorAlt : p.floor);
@@ -248,7 +296,7 @@ public final class CampBuilder {
         List<BlockPos> chestPos = new ArrayList<>();
         for (int i = 0; i < chests; i++) {
             int[] s = chestSpots[i];
-            Direction f = s[1] == -9 ? Direction.SOUTH : s[0] < 0 ? Direction.EAST : Direction.WEST;
+            Direction f = s[0] == -3 ? Direction.EAST : s[0] == 3 ? Direction.WEST : Direction.SOUTH; // side rows face the aisle
             k.set(s[0], 0, s[1], Blocks.CHEST.defaultBlockState().setValue(ChestBlock.FACING, f));
             chestPos.add(k.at(s[0], 0, s[1]));
         }

@@ -34,7 +34,7 @@ import java.util.List;
  * industrial blocks. Cannons sit on the towers from stage 3.
  */
 public final class CampBuilder {
-    public record Layout(List<BlockPos> chests, @Nullable BlockPos gate, List<BlockPos> cannons, int radius) {}
+    public record Layout(List<BlockPos> chests, @Nullable BlockPos gate, @Nullable BlockPos gateCrank, List<BlockPos> cannons, int radius) {}
 
     private CampBuilder() {}
 
@@ -93,7 +93,7 @@ public final class CampBuilder {
         tent(level, c.offset(-5, 0, 0), wools[r.nextInt(3)].defaultBlockState(), r, chests);
         tent(level, c.offset(5, 0, 0), wools[r.nextInt(3)].defaultBlockState(), r, chests);
         level.setBlock(c.offset(0, 0, 3), Blocks.CAMPFIRE.defaultBlockState(), 3);
-        return new Layout(chests, null, List.of(), 9);
+        return new Layout(chests, null, null, List.of(), 9);
     }
 
     /** A-frame tent, opening facing south (+z). o = centre of the opening at floor level. Bed inside, 1-2 chests by the opening. */
@@ -200,8 +200,12 @@ public final class CampBuilder {
             }
             if (i % 2 == 0) for (int[] e : new int[][]{{i, 11}, {i, -11}, {-11, i}, {11, i}}) k.set(e[0], 5, e[1], p.wallTop);
         }
-        BlockState gate = block("minecraft:" + w + "_fence_gate").setValue(FenceGateBlock.FACING, Direction.SOUTH);
-        for (int x = -1; x <= 1; x++) k.set(x, 0, 11, gate);
+        BlockPos gateCrank = null;
+        if (stage >= 4) gateCrank = createGate(k, p.wall);
+        else {
+            BlockState gate = block("minecraft:" + w + "_fence_gate").setValue(FenceGateBlock.FACING, Direction.SOUTH);
+            for (int x = -1; x <= 1; x++) k.set(x, 0, 11, gate);
+        }
         k.set(-2, 2, 12, Blocks.WALL_TORCH.defaultBlockState().setValue(WallTorchBlock.FACING, Direction.SOUTH));
         k.set(2, 2, 12, Blocks.WALL_TORCH.defaultBlockState().setValue(WallTorchBlock.FACING, Direction.SOUTH));
 
@@ -285,7 +289,30 @@ public final class CampBuilder {
             k.set(-8, 9, -8, Blocks.HAY_BLOCK.defaultBlockState());
             k.set(-8, 10, -8, Blocks.CAMPFIRE.defaultBlockState().setValue(CampfireBlock.SIGNAL_FIRE, true));
         }
-        return new Layout(chestPos, k.at(0, 0, 11), cannons, 24);
+        return new Layout(chestPos, k.at(0, 0, 11), gateCrank, cannons, 24);
+    }
+
+    /**
+     * Stage 4 gate made with Create: a glued 3x2 iron-bar gate in a wall pocket beside the doorway, a sticky mechanical
+     * piston (3 extension poles) that slides it across the opening, and a hand crank on the yard side to drive it.
+     * Built open; returns the crank position.
+     */
+    static BlockPos createGate(Canvas k, BlockState wall) {
+        for (int x = 2; x <= 4; x++)
+            for (int y = 0; y <= 1; y++) {
+                k.set(x, y, 11, Blocks.IRON_BARS.defaultBlockState());
+                k.set(x, y, 10, wall); // the pocket is walled in on both sides, so it is never a hole when the gate is shut
+                k.set(x, y, 12, wall);
+            }
+        // Create's piston shaft axis is FACING x axis_along_first (X-facing: false = Z shaft; Z-facing: true = X shaft) and
+        // isn't fixed up by rotation, so set it in world terms: a horizontal shaft the yard-side crank can drive.
+        Direction f = k.rot().rotate(Direction.WEST);
+        k.level().setBlock(k.at(5, 0, 11), Artillery.with(Artillery.with(block("create:sticky_mechanical_piston"), "facing", f.getSerializedName()),
+                "axis_along_first", String.valueOf(f.getAxis() == Direction.Axis.Z)), 3);
+        for (int x = 6; x <= 8; x++) k.set(x, 0, 11, Artillery.with(block("create:piston_extension_pole"), "facing", "west"));
+        k.set(5, 0, 10, Artillery.with(block("create:hand_crank"), "facing", "north"));
+        Artillery.glue(k.level(), k.at(2, 0, 11), k.at(4, 1, 11));
+        return k.at(5, 0, 10);
     }
 
     // ------------------------------------------------------------------ loot

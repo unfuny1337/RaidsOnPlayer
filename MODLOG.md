@@ -85,6 +85,38 @@ More gotchas:
 8. A spawnpoint covered by blocks is cleared by vanilla on respawn, so the player leaves the base (members 0) until a new bed is set. This is by design.
 9. Dev client death: no input tool, so `gamerule doImmediateRespawn true` + client restart respawns automatically.
 
+## Milestone 2 (branch `milestone-2`, 2026-11-17)
+Verified in game (dev server + client):
+1. **Outposts:** stage 2 spruce outpost in a snowy taiga (biome wood), with walls, 4 towers with ladders, a gate facing the player base,
+   a loot room, barracks, a farm and the campfire. Stage 3: cobblestone, crenels, lava moat with a bridge at the gate. Stage 4:
+   industrial iron, andesite casing towers, iron-bar tops, a smokestack.
+2. **CBC cannons:** they assemble on tower mounts and aim themselves (yaw 74.6° vs a true bearing of 73.7°). An HE shell landed 8.7
+   blocks from home inside the ±8 random spread. Crater seen.
+3. **Airstrike:** `/rop airstrike` and automatically 15 s after a stage 4 raid reaches the base ("from the east" was correct).
+4. **Create gate (stage 4):** a sticky mechanical piston slides a glued 3x2 iron-bar gate; a hand crank drives it. The gate closes
+   after building, opens when a raid leaves (9 raiders marched out), and closes when the raid returns. The watchman stands outside it.
+
+CBC/Create facts learned (no public API; reflection only):
+- Floor cannon mount = `vertical_direction=down`, and the cannon sits **2 blocks above** the mount (`assemble()` looks at relative(dir, -2)).
+- `BigCannonBlock.onPlace(Level, BlockPos)` (static) links cannon blocks placed with setBlock (sets `Connections` in their BE NBT).
+- `CannonMountBlockEntity`: protected `assemble()`, public `setYaw/setPitch(float)`, `getContraption()`. Yaw uses MC convention (south=0, north=180).
+  Back face = assembly redstone, front face = fire redstone.
+- HE shell physics: gravity -0.05/tick; drag = 0.01 × |v| along -v; pos += v then v += forces. The `Ballistics` solver matches it.
+- `FuzedBigCannonProjectile.setFuze(ItemStack)` + `createbigcannons:impact_fuze` makes an impact-fuzed shell.
+- Create piston shaft axis = f(FACING, axis_along_first): X-facing false→Z, Z-facing true→X. **Block rotation does not fix this up.**
+- `HandCrankBlockEntity.turn(back=true)` extends the gate piston = closes the gate. A crank only spins while turn() is called every tick (`Cranks`).
+- `SuperGlueEntity(Level, AABB)` + `SuperGlueEntity.span(a, b)` glues blocks.
+
+More gotchas:
+10. The first cannon attempt was 1 block above the mount and silently assembled nothing (no exception). Read `assemble()` bytecode.
+11. Rebuilds happen while nobody is near, so the camp's entities may not be loaded, and old contraptions would float over the new build.
+    Fix: a region ticket plus `areEntitiesLoaded`, then remove contraption and glue entities, then build.
+12. The gate pocket became a hole in the wall when the gate was shut. Fix: wall layers on both sides of the pocket.
+13. A raid took the watchman along. Fix: entities restricted to radius ≤ 2 stay.
+14. HE craters next to a lava moat break it and spill lava. Accepted: it's combat damage.
+
+Not verified: crank direction for gate orientations other than west (rotation should preserve it); the stage 2 press/water wheel
+orientation up close (decorative, doesn't spin).
+
 ## Next step
-Milestone 2: outpost (concept2.png) for stages 2-4, biome wood, Create mechanisms and farm (stage 2), lava moat + CBC cannon (stage 3),
-industrial gate + 2-4 cannons + airstrike (stage 4). Install into the user's instance once they say so.
+Install into the user's instance (ask first; the instance is missing ritchiesprojectilelib). Push the branch when asked.

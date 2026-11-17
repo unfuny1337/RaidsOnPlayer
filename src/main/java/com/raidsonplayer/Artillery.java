@@ -16,6 +16,7 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 import javax.annotation.Nullable;
@@ -102,10 +103,23 @@ final class Artillery {
         return error;
     }
 
-    static void disassemble(ServerLevel level, BlockPos mount) {
-        level.getChunk(mount);
-        BlockEntity be = level.getBlockEntity(mount);
-        if (contraption(be) != null) call(be, "disassemble", new Class<?>[0]);
+    /** Removes Create/CBC contraptions and glue around a base before it is rebuilt (their blocks would otherwise float over the new build). */
+    static void clearContraptions(ServerLevel level, BlockPos c, int r) {
+        for (Entity e : level.getEntities((Entity) null, new AABB(c).inflate(r, 32, r), e -> {
+            String path = BuiltInRegistries.ENTITY_TYPE.getKey(e.getType()).getPath();
+            return path.contains("contraption") || path.contains("glue");
+        })) e.discard();
+    }
+
+    /** Super Glue over the box from a to b, so a piston moves those blocks together. */
+    static void glue(ServerLevel level, BlockPos a, BlockPos b) {
+        try {
+            Class<?> c = Class.forName("com.simibubi.create.content.contraptions.glue.SuperGlueEntity");
+            AABB box = (AABB) c.getMethod("span", BlockPos.class, BlockPos.class).invoke(null, a, b);
+            level.addFreshEntity((Entity) c.getConstructor(Level.class, AABB.class).newInstance(level, box));
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            RaidsOnPlayer.LOG.warn("Could not glue the gate: {}", e.toString());
+        }
     }
 
     static Vec3 velocity(Vec3 from, Vec3 to, int ticks) {

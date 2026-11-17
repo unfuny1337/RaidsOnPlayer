@@ -31,7 +31,7 @@ public class RaidData extends SavedData {
         public int campStage, campRadius;
         public final List<BlockPos> chests = new ArrayList<>();
         public final List<BlockPos> cannons = new ArrayList<>();
-        @Nullable public BlockPos gate;
+        @Nullable public BlockPos gate, gateCrank;
         public long nextRaid, lastSeen, lastRegen, nextPlaceTry, nextCannon;
         @Nullable public UUID garrison, raid;
     }
@@ -76,6 +76,7 @@ public class RaidData extends SavedData {
             b.cannons.forEach(p -> cn.add(LongTag.valueOf(p.asLong())));
             t.put("cannons", cn);
             if (b.gate != null) t.putLong("gate", b.gate.asLong());
+            if (b.gateCrank != null) t.putLong("gateCrank", b.gateCrank.asLong());
             t.putLong("nextRaid", b.nextRaid);
             t.putLong("lastSeen", b.lastSeen);
             t.putLong("lastRegen", b.lastRegen);
@@ -122,6 +123,7 @@ public class RaidData extends SavedData {
             for (Tag c : t.getList("chests", Tag.TAG_LONG)) b.chests.add(BlockPos.of(((LongTag) c).getAsLong()));
             for (Tag c : t.getList("cannons", Tag.TAG_LONG)) b.cannons.add(BlockPos.of(((LongTag) c).getAsLong()));
             if (t.contains("gate")) b.gate = BlockPos.of(t.getLong("gate"));
+            if (t.contains("gateCrank")) b.gateCrank = BlockPos.of(t.getLong("gateCrank"));
             b.nextRaid = t.getLong("nextRaid");
             b.lastSeen = t.getLong("lastSeen");
             b.lastRegen = t.getLong("lastRegen");

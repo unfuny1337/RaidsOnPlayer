@@ -12,6 +12,8 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.level.TicketType;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.util.Mth;
@@ -42,6 +44,8 @@ public final class RaidManager {
     static final int BASE_RADIUS = 64, SEEN_UNSEEN_TICKS = 3600, ATTACK_TIMEOUT = 4800;
     static final double MARCH_SPEED = 2.5; // blocks per second while virtual
     static final double CANNON_RANGE = 150;
+    static final boolean CRANK_BACK_OPENS = false; // turn(back=true) extends the piston = closes the gate (measured in game)
+    static final TicketType<ChunkPos> REBUILD_TICKET = TicketType.create("raidsonplayer_rebuild", java.util.Comparator.comparingLong(ChunkPos::toLong), 300);
 
     private RaidManager() {}
 
@@ -115,7 +119,7 @@ public final class RaidManager {
         }
         double seen = level.getServer().getPlayerList().getViewDistance() * 16.0;
         if (!level.getPlayers(p -> !p.isSpectator() && horizontalDist(p.position(), Vec3.atCenterOf(b.camp)) < seen).isEmpty()) b.lastSeen = t;
-        if (b.campStage != d.stage && b.raid == null && t - b.lastSeen >= SEEN_UNSEEN_TICKS) rebuild(level, d, b);
+        if (b.campStage != d.stage && b.raid == null && t - b.lastSeen >= SEEN_UNSEEN_TICKS && campLoaded(level, b)) rebuild(level, d, b);
 
         Squad g = d.squads.get(b.garrison);
         if (g != null && t - b.lastRegen >= 24000) {
@@ -145,12 +149,22 @@ public final class RaidManager {
         return Math.abs(dx) > Math.abs(dz) ? (dx > 0 ? Direction.EAST : Direction.WEST) : (dz > 0 ? Direction.SOUTH : Direction.NORTH);
     }
 
+    /** Keeps the base area loaded until its entities are in memory, so old contraptions can be removed before a rebuild. */
+    static boolean campLoaded(ServerLevel level, Base b) {
+        ChunkPos c = new ChunkPos(b.camp);
+        level.getChunkSource().addRegionTicket(REBUILD_TICKET, c, 3, c);
+        for (int dx = -2; dx <= 2; dx++)
+            for (int dz = -2; dz <= 2; dz++) if (!level.areEntitiesLoaded(ChunkPos.asLong(c.x + dx, c.z + dz))) return false;
+        return true;
+    }
+
     static void apply(Base b, CampBuilder.Layout l, int stage) {
         b.chests.clear();
         b.chests.addAll(l.chests());
         b.cannons.clear();
         b.cannons.addAll(l.cannons());
         b.gate = l.gate();
+        b.gateCrank = l.gateCrank();
         b.campRadius = l.radius();
         b.campStage = stage;
     }
@@ -158,6 +172,7 @@ public final class RaidManager {
     /** Opens or closes the fence gates of the outpost gate (the watchman does it when a raid leaves or comes home). */
     static void setGate(ServerLevel level, Base b, boolean open) {
         if (b.gate == null || !level.isLoaded(b.gate)) return;
+        if (b.gateCrank != null) { Cranks.turn(level, b.gateCrank, open == CRANK_BACK_OPENS, 100); return; } // stage 4 Create gate
         for (BlockPos p : BlockPos.betweenClosed(b.gate.offset(-1, 0, -1), b.gate.offset(1, 0, 1))) {
             BlockState st = level.getBlockState(p);
             if (st.getBlock() instanceof FenceGateBlock && st.getValue(FenceGateBlock.OPEN) != open)
@@ -176,6 +191,7 @@ public final class RaidManager {
             if (c == null) continue;
             b.camp = c;
             apply(b, CampBuilder.build(level, c, d.stage, 0, facing(c, b.home), level.random), d.stage);
+            setGate(level, b, false);
             Squad g = new Squad();
             g.base = b.id;
             g.state = State.GARRISON;
@@ -193,9 +209,10 @@ public final class RaidManager {
         Squad g = d.squads.get(b.garrison);
         if (g != null) dematerialize(g, level); // nobody is watching, so no one sees them vanish
         List<ItemStack> kept = CampBuilder.empty(level, b.chests);
-        for (BlockPos m : b.cannons) Artillery.disassemble(level, m); // put the cannon back into blocks before clearing
+        Artillery.clearContraptions(level, b.camp, b.campRadius + 4);
         apply(b, CampBuilder.build(level, b.camp, d.stage, b.campRadius, facing(b.camp, b.home), level.random), d.stage);
         CampBuilder.deposit(level, b.camp, b.chests, kept);
+        setGate(level, b, false);
         if (g != null) g.count = Math.max(g.count, GARRISON_CAP[d.stage]);
         RaidsOnPlayer.LOG.info("Raider camp at {} rebuilt for stage {}", b.camp, d.stage);
     }
@@ -222,7 +239,7 @@ public final class RaidManager {
         s.stateSince = t;
         g.count -= k;
         for (Iterator<UUID> it = g.live.iterator(); it.hasNext() && s.live.size() < k; ) {
-            if (level.getEntity(it.next()) instanceof RaiderEntity e) {
+            if (level.getEntity(it.next()) instanceof RaiderEntity e && e.getRestrictRadius() > 2) { // the watchman (radius 2) stays at the gate
                 it.remove();
                 e.squadId = s.id;
                 e.clearRestriction();

@@ -48,6 +48,7 @@ public class RaiderEntity extends Pillager {
     boolean stealing;
     @Nullable private Vec3 lastCheck;
     private final Map<BlockPos, Long> usedMechanisms = new HashMap<>();
+    private boolean crankBack; // alternates, so a raider tries both ways on a crank-driven gate
 
     public RaiderEntity(EntityType<? extends Pillager> type, Level level) {
         super(type, level);
@@ -248,13 +249,13 @@ public class RaiderEntity extends Pillager {
             else if (b instanceof FenceGateBlock) {
                 level().setBlock(pos, st.setValue(FenceGateBlock.OPEN, !st.getValue(FenceGateBlock.OPEN)), 10);
                 level().playSound(null, pos, SoundEvents.FENCE_GATE_OPEN, SoundSource.BLOCKS, 1f, 1f);
-            } else cranking = 60;
+            } else { cranking = 100; crankBack = !crankBack; }
         }
 
         private void turnCrank() {
             BlockEntity be = level().getBlockEntity(pos);
             Method m = be == null ? null : crankMethod(be);
-            try { if (m != null) m.invoke(be, false); } catch (ReflectiveOperationException e) { cranking = 0; }
+            try { if (m != null) m.invoke(be, crankBack); } catch (ReflectiveOperationException e) { cranking = 0; }
         }
 
         private boolean isMechanism(BlockState st, BlockPos p) {

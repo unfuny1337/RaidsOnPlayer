@@ -46,7 +46,10 @@ public class RaidsOnPlayer {
                 .add(Attributes.MAX_HEALTH, 20.0).add(Attributes.ATTACK_DAMAGE, 1.0).build()));
         container.registerConfig(ModConfig.Type.COMMON, Config.SPEC);
 
-        NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post e) -> RaidManager.tick(e.getServer()));
+        NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post e) -> {
+            Cranks.tick();
+            RaidManager.tick(e.getServer());
+        });
         NeoForge.EVENT_BUS.addListener((AdvancementEvent.AdvancementEarnEvent e) -> {
             if (e.getEntity() instanceof ServerPlayer p) RaidManager.updateStage(p.server, RaidData.get(p.server));
         });
@@ -74,6 +77,7 @@ public class RaidsOnPlayer {
                 .then(Commands.literal("rebuild").executes(c -> {
                     Base b = RaidManager.baseOf(data(c.getSource()), c.getSource().getPlayerOrException());
                     if (b == null || b.camp == null) { c.getSource().sendFailure(Component.literal("No camp yet.")); return 0; }
+                    if (!RaidManager.campLoaded(c.getSource().getServer().overworld(), b)) { c.getSource().sendFailure(Component.literal("Loading the camp area, run it again in a few seconds.")); return 0; }
                     RaidManager.rebuild(c.getSource().getServer().overworld(), data(c.getSource()), b);
                     c.getSource().sendSuccess(() -> Component.literal("Camp rebuilt."), false);
                     return 1;
@@ -87,6 +91,7 @@ public class RaidsOnPlayer {
                     c.getSource().sendSuccess(() -> Component.literal(n + " cannon(s) fired."), false);
                     return n;
                 }))
+                .then(Commands.literal("gate").then(Commands.literal("open").executes(c -> gate(c.getSource(), true))).then(Commands.literal("close").executes(c -> gate(c.getSource(), false))))
                 .then(Commands.literal("airstrike").executes(c -> { // airstrike on yourself from your raider base's side
                     ServerPlayer p = c.getSource().getPlayerOrException();
                     Base b = RaidManager.baseOf(data(c.getSource()), p);
@@ -97,6 +102,13 @@ public class RaidsOnPlayer {
     }
 
     static RaidData data(CommandSourceStack s) { return RaidData.get(s.getServer()); }
+
+    static int gate(CommandSourceStack src, boolean open) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        Base b = RaidManager.baseOf(data(src), src.getPlayerOrException());
+        if (b == null || b.gate == null) { src.sendFailure(Component.literal("Your raider base has no gate.")); return 0; }
+        RaidManager.setGate(src.getServer().overworld(), b, open);
+        return 1;
+    }
 
     static int info(CommandSourceStack src) {
         RaidData d = data(src);

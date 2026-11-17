@@ -116,7 +116,7 @@ public class RaiderEntity extends Pillager {
             Squad s = squad();
             Base b = s == null ? null : base(s);
             boolean wantsToMove = b != null && switch (s.state) {
-                case GARRISON -> false;
+                case GARRISON -> getTarget() != null && distanceToSqr(getTarget()) > 9; // defenders open their own gate
                 case OUTBOUND, RETREAT -> true;
                 case ATTACK -> stealing || getTarget() != null && distanceToSqr(getTarget()) > 9
                         || distanceToSqr(Vec3.atCenterOf(b.home)) > 12 * 12;
@@ -213,7 +213,7 @@ public class RaiderEntity extends Pillager {
             if (!stuck) return false;
             stuck = false; // one scan per stuck check (every 5 s), not every tick
             Squad s = squad();
-            if (s == null || s.state == State.GARRISON) return false;
+            if (s == null) return false;
             long now = level().getGameTime();
             usedMechanisms.values().removeIf(t -> now - t > 600);
             pos = BlockPos.betweenClosedStream(blockPosition().offset(-10, -3, -10), blockPosition().offset(10, 3, 10))

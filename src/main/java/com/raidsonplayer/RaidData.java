@@ -30,7 +30,9 @@ public class RaidData extends SavedData {
         @Nullable public BlockPos camp;
         public int campStage, campRadius;
         public final List<BlockPos> chests = new ArrayList<>();
-        public long nextRaid, lastSeen, lastRegen, nextPlaceTry;
+        public final List<BlockPos> cannons = new ArrayList<>();
+        @Nullable public BlockPos gate;
+        public long nextRaid, lastSeen, lastRegen, nextPlaceTry, nextCannon;
         @Nullable public UUID garrison, raid;
     }
 
@@ -40,6 +42,7 @@ public class RaidData extends SavedData {
         public State state;
         public Vec3 pos;
         public int count, startCount, stolen;
+        public boolean airstrike;
         public long stateSince, lastSteal;
         public final List<ItemStack> loot = new ArrayList<>();
         /** Entity UUIDs currently materialized. Not saved: raider entities are recreated from this data after a restart. */
@@ -69,6 +72,10 @@ public class RaidData extends SavedData {
             ListTag c = new ListTag();
             b.chests.forEach(p -> c.add(LongTag.valueOf(p.asLong())));
             t.put("chests", c);
+            ListTag cn = new ListTag();
+            b.cannons.forEach(p -> cn.add(LongTag.valueOf(p.asLong())));
+            t.put("cannons", cn);
+            if (b.gate != null) t.putLong("gate", b.gate.asLong());
             t.putLong("nextRaid", b.nextRaid);
             t.putLong("lastSeen", b.lastSeen);
             t.putLong("lastRegen", b.lastRegen);
@@ -89,6 +96,7 @@ public class RaidData extends SavedData {
             t.putInt("count", s.count);
             t.putInt("startCount", s.startCount);
             t.putInt("stolen", s.stolen);
+            t.putBoolean("airstrike", s.airstrike);
             t.putLong("stateSince", s.stateSince);
             ListTag loot = new ListTag();
             s.loot.stream().filter(i -> !i.isEmpty()).forEach(i -> loot.add(i.save(reg)));
@@ -112,6 +120,8 @@ public class RaidData extends SavedData {
             b.campStage = t.getInt("campStage");
             b.campRadius = t.getInt("campRadius");
             for (Tag c : t.getList("chests", Tag.TAG_LONG)) b.chests.add(BlockPos.of(((LongTag) c).getAsLong()));
+            for (Tag c : t.getList("cannons", Tag.TAG_LONG)) b.cannons.add(BlockPos.of(((LongTag) c).getAsLong()));
+            if (t.contains("gate")) b.gate = BlockPos.of(t.getLong("gate"));
             b.nextRaid = t.getLong("nextRaid");
             b.lastSeen = t.getLong("lastSeen");
             b.lastRegen = t.getLong("lastRegen");
@@ -129,6 +139,7 @@ public class RaidData extends SavedData {
             s.count = t.getInt("count");
             s.startCount = t.getInt("startCount");
             s.stolen = t.getInt("stolen");
+            s.airstrike = t.getBoolean("airstrike");
             s.stateSince = t.getLong("stateSince");
             for (Tag i : t.getList("loot", Tag.TAG_COMPOUND)) ItemStack.parse(reg, i).ifPresent(s.loot::add);
             d.squads.put(s.id, s);

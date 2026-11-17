@@ -6,6 +6,7 @@ import com.raidsonplayer.RaidData.State;
 import net.minecraft.ChatFormatting;
 import net.minecraft.advancements.AdvancementHolder;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
@@ -20,6 +21,8 @@ import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.FenceGateBlock;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.Vec3;
 
@@ -38,6 +41,7 @@ public final class RaidManager {
     static final int[] GARRISON_CAP = {0, 4, 6, 8, 10};
     static final int BASE_RADIUS = 64, SEEN_UNSEEN_TICKS = 3600, ATTACK_TIMEOUT = 4800;
     static final double MARCH_SPEED = 2.5; // blocks per second while virtual
+    static final double CANNON_RANGE = 150;
 
     private RaidManager() {}
 
@@ -119,6 +123,47 @@ public final class RaidManager {
             g.count = Math.max(g.count, Math.min(GARRISON_CAP[d.stage], g.count + 1));
         }
         if (g != null && b.raid == null && t >= b.nextRaid && g.count >= 2 && memberNear(level, b, 128)) startRaid(level, b, g, t);
+
+        // Tower cannons shell the player base when it is within cannon range and someone is home. Nobody mans them.
+        if (!b.cannons.isEmpty() && t >= b.nextCannon && horizontalDist(Vec3.atCenterOf(b.camp), Vec3.atCenterOf(b.home)) <= CANNON_RANGE
+                && memberNear(level, b, 64)) {
+            b.nextCannon = t + 600 + level.random.nextInt(600);
+            BlockPos m = b.cannons.get(level.random.nextInt(b.cannons.size()));
+            if (level.isLoaded(m)) Artillery.fireCannon(level, m, groundNear(level, b.home, 8));
+        }
+    }
+
+    /** A random surface point within `spread` blocks of `p` (the chunk must be loaded). */
+    static Vec3 groundNear(ServerLevel level, BlockPos p, double spread) {
+        double x = p.getX() + 0.5 + Mth.nextDouble(level.random, -spread, spread), z = p.getZ() + 0.5 + Mth.nextDouble(level.random, -spread, spread);
+        return new Vec3(x, level.getHeight(Heightmap.Types.MOTION_BLOCKING, Mth.floor(x), Mth.floor(z)), z);
+    }
+
+    /** The side of the camp that faces the player base: the gate goes there. */
+    static Direction facing(BlockPos camp, BlockPos home) {
+        int dx = home.getX() - camp.getX(), dz = home.getZ() - camp.getZ();
+        return Math.abs(dx) > Math.abs(dz) ? (dx > 0 ? Direction.EAST : Direction.WEST) : (dz > 0 ? Direction.SOUTH : Direction.NORTH);
+    }
+
+    static void apply(Base b, CampBuilder.Layout l, int stage) {
+        b.chests.clear();
+        b.chests.addAll(l.chests());
+        b.cannons.clear();
+        b.cannons.addAll(l.cannons());
+        b.gate = l.gate();
+        b.campRadius = l.radius();
+        b.campStage = stage;
+    }
+
+    /** Opens or closes the fence gates of the outpost gate (the watchman does it when a raid leaves or comes home). */
+    static void setGate(ServerLevel level, Base b, boolean open) {
+        if (b.gate == null || !level.isLoaded(b.gate)) return;
+        for (BlockPos p : BlockPos.betweenClosed(b.gate.offset(-1, 0, -1), b.gate.offset(1, 0, 1))) {
+            BlockState st = level.getBlockState(p);
+            if (st.getBlock() instanceof FenceGateBlock && st.getValue(FenceGateBlock.OPEN) != open)
+                level.setBlock(p, st.setValue(FenceGateBlock.OPEN, open), 10);
+        }
+        level.playSound(null, b.gate, open ? SoundEvents.FENCE_GATE_OPEN : SoundEvents.FENCE_GATE_CLOSE, SoundSource.BLOCKS, 1f, 1f);
     }
 
     static void placeCamp(ServerLevel level, RaidData d, Base b, long t) {
@@ -130,10 +175,7 @@ public final class RaidManager {
             BlockPos c = CampBuilder.trySite(level, x, z);
             if (c == null) continue;
             b.camp = c;
-            b.campRadius = CampBuilder.RADIUS;
-            b.campStage = d.stage;
-            b.chests.clear();
-            b.chests.addAll(CampBuilder.build(level, c, d.stage, 0, level.random));
+            apply(b, CampBuilder.build(level, c, d.stage, 0, facing(c, b.home), level.random), d.stage);
             Squad g = new Squad();
             g.base = b.id;
             g.state = State.GARRISON;
@@ -151,12 +193,9 @@ public final class RaidManager {
         Squad g = d.squads.get(b.garrison);
         if (g != null) dematerialize(g, level); // nobody is watching, so no one sees them vanish
         List<ItemStack> kept = CampBuilder.empty(level, b.chests);
-        List<BlockPos> chests = CampBuilder.build(level, b.camp, d.stage, b.campRadius, level.random);
-        b.chests.clear();
-        b.chests.addAll(chests);
-        CampBuilder.deposit(level, b.camp, chests, kept);
-        b.campStage = d.stage;
-        b.campRadius = CampBuilder.RADIUS;
+        for (BlockPos m : b.cannons) Artillery.disassemble(level, m); // put the cannon back into blocks before clearing
+        apply(b, CampBuilder.build(level, b.camp, d.stage, b.campRadius, facing(b.camp, b.home), level.random), d.stage);
+        CampBuilder.deposit(level, b.camp, b.chests, kept);
         if (g != null) g.count = Math.max(g.count, GARRISON_CAP[d.stage]);
         RaidsOnPlayer.LOG.info("Raider camp at {} rebuilt for stage {}", b.camp, d.stage);
     }
@@ -191,6 +230,7 @@ public final class RaidManager {
             }
         }
         RaidData.get(level.getServer()).squads.put(s.id, s);
+        setGate(level, b, true);
         b.raid = s.id;
         b.nextRaid = t + raidInterval(level);
         tell(level, b, k + " raiders set out from their camp to the " + direction(b.home, b.camp) + "!", ChatFormatting.RED);
@@ -255,6 +295,7 @@ public final class RaidManager {
                 }
             }
             case ATTACK -> {
+                if (d.stage >= 4 && !s.airstrike && mat && t - s.stateSince > 300) callAirstrike(level, b, s);
                 if (losing(level, s)) {
                     enter(s, State.RETREAT, t);
                     tell(level, b, "The raiders are losing and pull back to their camp!", ChatFormatting.GREEN);
@@ -268,6 +309,16 @@ public final class RaidManager {
                 if (horizontalDist(s.pos, camp) < 12) returnHome(level, d, s, b);
             }
         }
+    }
+
+    /** Stage 4: once per raid, 2-4 impact-fuzed HE shells dive in on a defender from the side the raider base is on. */
+    static void callAirstrike(ServerLevel level, Base b, Squad s) {
+        s.airstrike = true;
+        List<ServerPlayer> targets = b.members.stream().map(u -> level.getServer().getPlayerList().getPlayer(u))
+                .filter(p -> p != null && p.level() == level && horizontalDist(p.position(), Vec3.atCenterOf(b.home)) < 64).toList();
+        Vec3 target = targets.isEmpty() ? groundNear(level, b.home, 4) : targets.get(level.random.nextInt(targets.size())).position();
+        Artillery.airstrike(level, target, Vec3.atCenterOf(b.camp).subtract(target), 2 + level.random.nextInt(3), level.random);
+        tell(level, b, "The raiders called an airstrike from the " + direction(b.home, b.camp) + "! Take cover!", ChatFormatting.DARK_RED);
     }
 
     static void enter(Squad s, State st, long t) {
@@ -293,7 +344,7 @@ public final class RaidManager {
                 loot.addAll(e.getInventory().removeAllItems());
                 if (g != null) {
                     e.squadId = g.id;
-                    e.restrictTo(b.camp, 10);
+                    e.restrictTo(b.camp, b.gate != null ? 8 : 10);
                     g.live.add(u);
                 } else e.discard();
             }
@@ -301,6 +352,7 @@ public final class RaidManager {
         if (g != null) g.count = Math.max(g.count, Math.min(GARRISON_CAP[d.stage], g.count + s.count)); // extra survivors disperse
         CampBuilder.deposit(level, b.camp, b.chests, loot);
         d.squads.remove(s.id);
+        setGate(level, b, false);
         b.raid = null;
         RaidsOnPlayer.LOG.info("Raid squad home at {} with {} survivors and {} stacks", b.camp, s.count, loot.size());
     }
@@ -310,13 +362,17 @@ public final class RaidManager {
         while (s.live.size() < s.count) {
             RaiderEntity e = RaidsOnPlayer.RAIDER.get().create(level);
             if (e == null) return;
-            double x = s.pos.x + Mth.nextDouble(level.random, -3, 3), z = s.pos.z + Mth.nextDouble(level.random, -3, 3);
+            // The first garrison raider of an outpost is the watchman: he stands outside the gate.
+            boolean watchman = s.state == State.GARRISON && b.gate != null && s.live.isEmpty();
+            Vec3 at = watchman ? Vec3.atBottomCenterOf(b.gate.relative(facing(b.camp, b.home), 2)) : s.pos;
+            double x = at.x + (watchman ? 0 : Mth.nextDouble(level.random, -3, 3)), z = at.z + (watchman ? 0 : Mth.nextDouble(level.random, -3, 3));
             int y = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, Mth.floor(x), Mth.floor(z));
             e.moveTo(x, y, z, level.random.nextFloat() * 360f, 0f);
             e.squadId = s.id;
             e.setPersistenceRequired();
             equip(e, d.stage, level);
-            if (s.state == State.GARRISON) e.restrictTo(b.camp, 10);
+            if (watchman) e.restrictTo(BlockPos.containing(at), 2);
+            else if (s.state == State.GARRISON) e.restrictTo(b.camp, b.gate != null ? 8 : 10);
             level.addFreshEntity(e);
             s.live.add(e.getUUID());
             spawned.add(e);

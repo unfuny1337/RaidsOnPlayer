@@ -6,6 +6,7 @@ import com.raidsonplayer.RaidData.Base;
 import com.raidsonplayer.RaidData.Squad;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
@@ -75,6 +76,22 @@ public class RaidsOnPlayer {
                     if (b == null || b.camp == null) { c.getSource().sendFailure(Component.literal("No camp yet.")); return 0; }
                     RaidManager.rebuild(c.getSource().getServer().overworld(), data(c.getSource()), b);
                     c.getSource().sendSuccess(() -> Component.literal("Camp rebuilt."), false);
+                    return 1;
+                }))
+                .then(Commands.literal("fire").executes(c -> { // every cannon of your raider base fires at your home now, ignoring range
+                    Base b = RaidManager.baseOf(data(c.getSource()), c.getSource().getPlayerOrException());
+                    ServerLevel level = c.getSource().getServer().overworld();
+                    int fired = 0;
+                    if (b != null) for (BlockPos m : b.cannons) if (Artillery.fireCannon(level, m, RaidManager.groundNear(level, b.home, 8))) fired++;
+                    int n = fired;
+                    c.getSource().sendSuccess(() -> Component.literal(n + " cannon(s) fired."), false);
+                    return n;
+                }))
+                .then(Commands.literal("airstrike").executes(c -> { // airstrike on yourself from your raider base's side
+                    ServerPlayer p = c.getSource().getPlayerOrException();
+                    Base b = RaidManager.baseOf(data(c.getSource()), p);
+                    if (b == null || b.camp == null) { c.getSource().sendFailure(Component.literal("No camp yet.")); return 0; }
+                    Artillery.airstrike(p.serverLevel(), p.position(), net.minecraft.world.phys.Vec3.atCenterOf(b.camp).subtract(p.position()), 3, p.getRandom());
                     return 1;
                 })));
     }

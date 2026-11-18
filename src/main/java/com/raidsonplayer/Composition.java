@@ -9,16 +9,19 @@ import static com.raidsonplayer.Role.*;
 /** Who goes into which squad, per stage (prompt2.txt). Pure Java so it can be unit tested. */
 final class Composition {
     static final int[] GARRISON_CAP = {0, 4, 6, 8, 10};
+    /** Expansion camps are bigger: half again as many raiders (the extra ones are plain raiders). */
+    static final int[] EXPANSION_CAP = {0, 6, 9, 12, 15};
 
     private Composition() {}
 
     /** Camp garrison at full strength. The first raider is the watchman; the artilleryman stays home on raids. */
-    static List<Role> garrison(int stage) {
+    static List<Role> garrison(int stage) { return garrison(stage, GARRISON_CAP[stage]); }
+
+    static List<Role> garrison(int stage, int size) {
         List<Role> r = new ArrayList<>(List.of(LEADER, RAIDER, MINER));
         if (stage >= 2) r.add(DEMOMAN);
         if (stage >= 3) r.add(ARTILLERYMAN);
         if (stage >= 4) r.add(MINER);
-        int size = GARRISON_CAP[stage];
         while (r.size() < size) r.add(RAIDER);
         return r;
     }
@@ -59,8 +62,8 @@ final class Composition {
     }
 
     /** The roles a garrison is missing compared to full strength (used for daily regrowth and rebuilds). */
-    static List<Role> missing(List<Role> have, int stage) {
-        List<Role> want = garrison(stage);
+    static List<Role> missing(List<Role> have, int stage, int size) {
+        List<Role> want = garrison(stage, size);
         for (Role r : have) want.remove(r);
         return want;
     }

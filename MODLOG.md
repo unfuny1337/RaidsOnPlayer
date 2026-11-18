@@ -267,5 +267,23 @@ older saves keep their timers. Short timers (waves, strikes, cannons, 30 s retri
 `/rop info` shows the raider day. Verified over RCON: /time add 12000 moved the next day raid 57 -> 47 min; /time set 1000
 afterwards left it at 47; with the daylight cycle off it went 47 -> 46 in 62 s.
 
+## Bigger expansion camps, overnight rebuilds (2026-11-18)
+Request: expansion camps bigger depending on stage (user chose: bigger build and more raiders); camps rebuild only after
+nights and only when no player sees them.
+Built:
+- `CampBuilder.outpost` takes the wall half-width `h` (`outpostHalf`: 11 for a first camp, 9 + 2*stage = 13/15/17 for
+  expansion camps). Floor, walls, gate (and the stage 4 Create gate pocket), towers, cannon mounts, loot room, beds and moat all
+  follow `h`; the footprint radius is h + 13. From h 15: a tower mid-way along each side wall (more cannon spots), a wider loot
+  room with up to 14 chest spots, 1-3 more chests, more beds. Stage 1 expansion camps: two rows of two tents, radius 14.
+- Garrison: `Composition.EXPANSION_CAP` {6, 9, 12, 15} (extra slots are raiders); `RaidManager.cap(b, stage)` everywhere the
+  cap was used (placement, daily regrowth, rebuilds, survivors rejoining). Camp spacing raised to 72.
+- Rebuild: `Base.upgradeAt` (raider clock) = the next morning after the stage changed; the camp is rebuilt from then on, once
+  nobody has been in view for 3 min and it isn't raiding. `/rop rebuild` stays immediate.
+Verified in game: a stage 4 expansion camp 35 blocks across with 6 towers, cannons, moat and wide loot room (screenshot from
+above), garrison 15; a stage 1 expansion camp with 4 tents and 2 campfires, garrison 6. After `/rop stage 4` at day 1000 with
+the player out of view, 4000 ticks of daytime gave no rebuilds; jumping to the next morning rebuilt every camp (ours and the
+other test bases') within ~30 s as their areas loaded.
+Not verified: stages 2 and 3 expansion builds in game (same code path, h 13 and 15).
+
 ## Next step
 Install into the user's instance (ask first; the instance is missing ritchiesprojectilelib). Push the branch when asked. Next ideas: sleep-blocking check with a real player, tunnelling under obsidian, a clean flank test on untouched ground.

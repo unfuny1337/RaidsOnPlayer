@@ -48,9 +48,12 @@ class CompositionTest {
             List<Role> g = Composition.garrison(stage);
             assertEquals(Composition.GARRISON_CAP[stage], g.size());
             assertEquals(stage >= 3, g.contains(ARTILLERYMAN));
-            assertTrue(Composition.missing(g, stage).isEmpty());
+            assertTrue(Composition.missing(g, stage, Composition.GARRISON_CAP[stage]).isEmpty());
+            List<Role> big = Composition.garrison(stage, Composition.EXPANSION_CAP[stage]); // expansion camp: same classes, more raiders
+            assertEquals(Composition.EXPANSION_CAP[stage], big.size());
+            assertEquals(Composition.EXPANSION_CAP[stage] - Composition.GARRISON_CAP[stage], Composition.missing(g, stage, big.size()).size());
         }
-        assertEquals(List.of(LEADER), Composition.missing(List.of(RAIDER, MINER, RAIDER), 1));
+        assertEquals(List.of(LEADER), Composition.missing(List.of(RAIDER, MINER, RAIDER), 1, Composition.GARRISON_CAP[1]));
     }
 
     @Test

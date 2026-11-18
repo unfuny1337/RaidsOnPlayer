@@ -52,7 +52,7 @@ public final class RaidManager {
             {ResourceLocation.parse("create:brass")},
     };
     static final int[] GARRISON_CAP = Composition.GARRISON_CAP;
-    static final int CAMP_SPACING = 64; // blocks between raider camps
+    static final int CAMP_SPACING = 72; // blocks between raider camps (a stage 4 expansion camp clears 30 around its centre)
     static final int BASE_RADIUS = 64, SEEN_UNSEEN_TICKS = 3600, ATTACK_TIMEOUT = 4800;
     static final double MARCH_SPEED = 2.5; // blocks per second while virtual
     static final double CANNON_RANGE = 150;
@@ -158,13 +158,16 @@ public final class RaidManager {
         }
         double seen = level.getServer().getPlayerList().getViewDistance() * 16.0;
         if (!level.getPlayers(p -> !p.isSpectator() && horizontalDist(p.position(), Vec3.atCenterOf(b.camp)) < seen).isEmpty()) b.lastSeen = t;
-        if (b.campStage != d.stage && b.raid == null && b.waves == 0 && nightSquads(d, b).isEmpty() && t - b.lastSeen >= SEEN_UNSEEN_TICKS && campLoaded(level, b))
-            rebuild(level, d, b);
+        if (b.campStage != d.stage) { // they rebuild overnight: from the next morning on, once no player has seen the camp for 3 min
+            if (b.upgradeAt == 0) b.upgradeAt = d.clock + 24000 - dayTime(level);
+            if (d.clock >= b.upgradeAt && b.raid == null && b.waves == 0 && nightSquads(d, b).isEmpty() && t - b.lastSeen >= SEEN_UNSEEN_TICKS
+                    && campLoaded(level, b)) rebuild(level, d, b);
+        }
 
         Squad g = d.squads.get(b.garrison);
         if (g != null && d.clock - b.lastRegen >= 24000) { // one raider a day joins until the camp is at full strength
             b.lastRegen = d.clock;
-            reinforce(g, d.stage, 1);
+            reinforce(g, d.stage, cap(b, d.stage), 1);
         }
         boolean night = night(level);
         if (g != null && b.raid == null && b.waves == 0 && !night && d.clock >= b.nextRaid && canRaid(g) && memberNear(level, b, 128)) {
@@ -275,9 +278,9 @@ public final class RaidManager {
             BlockPos c = CampBuilder.trySite(level, x, z);
             if (c == null) continue;
             b.camp = c;
-            apply(b, CampBuilder.build(level, c, d.stage, 0, facing(c, b.home), level.random), d.stage);
+            apply(b, CampBuilder.build(level, c, d.stage, 0, facing(c, b.home), b.parent != null, level.random), d.stage);
             setGate(level, b, false);
-            Squad g = newSquad(b, Kind.GARRISON, State.GARRISON, Vec3.atBottomCenterOf(c), Composition.garrison(d.stage), t);
+            Squad g = newSquad(b, Kind.GARRISON, State.GARRISON, Vec3.atBottomCenterOf(c), Composition.garrison(d.stage, cap(b, d.stage)), t);
             d.squads.put(g.id, g);
             b.garrison = g.id;
             RaidsOnPlayer.LOG.info("Raider camp (stage {}) built at {} for base {}", d.stage, c, b.home);
@@ -306,18 +309,22 @@ public final class RaidManager {
         if (g != null) dematerialize(g, level); // nobody is watching, so no one sees them vanish
         List<ItemStack> kept = CampBuilder.empty(level, b.chests);
         Artillery.clearContraptions(level, b.camp, b.campRadius + 4);
-        apply(b, CampBuilder.build(level, b.camp, d.stage, b.campRadius, facing(b.camp, b.home), level.random), d.stage);
+        apply(b, CampBuilder.build(level, b.camp, d.stage, b.campRadius, facing(b.camp, b.home), b.parent != null, level.random), d.stage);
         CampBuilder.deposit(level, b.camp, b.chests, kept);
         setGate(level, b, false);
-        if (g != null) reinforce(g, d.stage, Integer.MAX_VALUE);
+        if (g != null) reinforce(g, d.stage, cap(b, d.stage), Integer.MAX_VALUE);
+        b.upgradeAt = 0;
         RaidsOnPlayer.LOG.info("Raider camp at {} rebuilt for stage {}", b.camp, d.stage);
     }
 
     /** Adds up to n classes the garrison lacks. At full strength a surplus raider makes room, so it never grows past the cap. */
-    static void reinforce(Squad g, int stage, int n) {
-        List<Role> miss = Composition.missing(g.roles, stage);
+    /** Full garrison strength of this camp: expansion camps hold half again as many. */
+    static int cap(Base b, int stage) { return (b.parent != null ? Composition.EXPANSION_CAP : GARRISON_CAP)[stage]; }
+
+    static void reinforce(Squad g, int stage, int cap, int n) {
+        List<Role> miss = Composition.missing(g.roles, stage, cap);
         for (int i = 0; i < n && i < miss.size(); i++) {
-            if (g.roles.size() >= GARRISON_CAP[stage] && !g.roles.remove(Role.RAIDER)) break;
+            if (g.roles.size() >= cap && !g.roles.remove(Role.RAIDER)) break;
             g.roles.add(miss.get(i));
         }
     }
@@ -816,7 +823,7 @@ public final class RaidManager {
         Squad g = d.squads.get(b.garrison);
         List<ItemStack> loot = new ArrayList<>(s.loot);
         s.loot.clear();
-        int cap = GARRISON_CAP[d.stage];
+        int cap = cap(b, d.stage);
         for (UUID u : s.live)
             if (level.getEntity(u) instanceof RaiderEntity e) {
                 loot.addAll(e.getInventory().removeAllItems());

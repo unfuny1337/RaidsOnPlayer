@@ -62,6 +62,8 @@ public class RaidData extends SavedData {
         // expansion: a camp the raiders added around another base's home shares its home and players (parent = that base)
         @Nullable public UUID parent;
         public long nextExpand;
+        /** Raider clock time from which the camp may be rebuilt for a new stage (the morning after the stage went up); 0 = nothing pending. */
+        public long upgradeAt;
     }
 
     public static class Squad {
@@ -136,6 +138,7 @@ public class RaidData extends SavedData {
             t.putBoolean("waveArrived", b.waveArrived);
             if (b.parent != null) t.putUUID("parent", b.parent);
             t.putLong("nextExpand", b.nextExpand);
+            t.putLong("upgradeAt", b.upgradeAt);
             bl.add(t);
         }
         tag.put("bases", bl);
@@ -214,6 +217,7 @@ public class RaidData extends SavedData {
             b.waveArrived = t.getBoolean("waveArrived");
             if (t.hasUUID("parent")) b.parent = t.getUUID("parent");
             b.nextExpand = t.getLong("nextExpand");
+            b.upgradeAt = t.getLong("upgradeAt");
             d.bases.put(b.id, b);
         }
         for (Tag e : tag.getList("squads", Tag.TAG_COMPOUND)) {

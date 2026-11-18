@@ -186,5 +186,45 @@ More gotchas:
 Not verified: horn waking a sleeper and the bed refusal during a night raid (the dev client has no input to lie in a bed);
 miners tunnelling under obsidian (stairs-down logic only seen with sand); the demoman's proactive breach with a fresh report, on its own.
 
+## Smarter raiders (branch `milestone-3`, 2026-11-18)
+Request: demomen throw TNT when there is nothing to breach; bow users switch to the bow when the player can't be reached;
+leaders put in boats for the squad; artillerymen keep their distance and call the airstrikes; the leader orders flanks on a
+running player; "depend more on the leader, use any opportunity".
+Built (RaiderEntity unless noted):
+- `unreachable` (path check every second, target within 16): leaders take the bow, raiders and miners undermine
+  (break the block under a target standing 1.5+ blocks above them, within reach). Melee goal stops once a bow is in hand.
+- Demoman `throwTnt`: target seen 5-16 blocks off, cooldown 3-5 s, keeps one stick on the way to a base. Lob velocity is
+  closed form (`Ballistics.throwTnt`, vanilla PrimedTnt step: gravity 0.04, move, drag 0.98; unit tested).
+  `ExplosionEvent.Detonate`: raider TNT breaks no blocks when raider griefing is off (vanilla TNT ignores mobGriefing).
+- Leader `lead()`: shares his target (as before) and, when a player target moves 3+ blocks/s away from him, gives flank orders:
+  mates alternate left/right/straight; `FlankGoal` runs to target + 0.6d ahead + 0.5d to the side (caps 10/7), speed 1.25, until 5 blocks off.
+- Leader `launchBoats`: on the way somewhere 12+ blocks off with 6 of the next 10 columns open water, puts in boats
+  (two raiders per boat), reusing empty floating boats ahead that no other raider has claimed. `BoardGoal` (priority 0),
+  `startRiding` override (vanilla boats grab any mob that bumps them), `ride()`: the first passenger steers toward
+  `moveGoal()` with a player-strength paddle push; all get out when the boat grounds or noses into land. Boats stay behind.
+- Artilleryman: spyglass, always the bow when fighting, avoids players within 8, and on a raid hangs back 22 blocks on the camp
+  side of the target (dry ground, tries 22/18/26/14/30). RaidManager `callStrike`: a field artilleryman (preferably one who sees
+  a player) fires a red flare and the shells land 3 s later on whoever he sees; kill him and they never come. With none in the
+  field, the camp guns fire blind as before. Prompt2 rules unchanged (needs him alive, stage 4 more often and tighter, random offset).
+Verified in game (dev server, walled test home, camp 35 blocks north):
+1. Demomen threw TNT at the player on a pillar (log: "threw TNT at Dev from 15/9 blocks"), blowing the pillar away.
+2. Undermining: "RAIDER undermines Dev at -289,67,2236" on a dirt pillar, the player dropped.
+3. Bow switch: 3 garrison leaders held bows while the player stood 6 up on stone; 8 damage absorbed from arrows in 5 s; an arrow
+   knocked the player off, then they went back to swords.
+4. Boats: a 40x11 water strip across the path. 4 leaders each put in 3 boats for 5 raiders, all 4 squads crossed and landed on
+   the far shore (boats left at z 2210). The first try had two leaders share boats; fixed with the claimed check.
+5. Artillerymen stood at their posts on the dry north shore holding the spyglass. Flares at 04:28:45, 04:29:39, 04:30:23 with the
+   chat warning; shells came 3 s after the flare (2 shells at stage 3, landing 14 and 20 blocks from the player).
+6. Flank orders fired on a sprinting player, in the right direction (run vector (5.2,0,0) and (5.8,0,0)).
+Not verified: the flank movement itself (the test field was cratered; squad mates were busy at the base or in pits and never
+got in range); undermining by miners through stone; boats on a retreat.
+Gotchas:
+22. Day raids at stage 3 on a scouted base call a strike 15 s after arrival: it craters any test setup. Test AI at stage 2.
+23. Mobs only look for targets 4 blocks up or down (`getTargetSearchArea`): raiders in a crater never see a player on the rim.
+24. Teleport-running the test player past solid ground got the client kicked ("Flying is not enabled"), which ends the raid
+    (squads go virtual, then home). `allow-flight=true` in run/server.properties while testing; restored to false after.
+25. A digger moved away mid-dig kept "mining" the old block for up to 30 s. Fix: the dig fails when the block is out of reach.
+26. Debug lines (flank, throw, boats, undermine) are LOG.debug; the dev run logs INFO only, so switch them to info to watch.
+
 ## Next step
-Install into the user's instance (ask first; the instance is missing ritchiesprojectilelib). Push the branch when asked. Next ideas: sleep-blocking check with a real player, tunnelling under obsidian.
+Install into the user's instance (ask first; the instance is missing ritchiesprojectilelib). Push the branch when asked. Next ideas: sleep-blocking check with a real player, tunnelling under obsidian, a clean flank test on untouched ground.

@@ -446,7 +446,7 @@ public final class RaidManager {
             if (!artilleryAlive(d, b)) { b.strikes = 0; return; } // no one left to call the guns
             b.strikes--;
             b.nextStrike = t + (d.stage >= 4 ? 400 + level.random.nextInt(400) : 800 + level.random.nextInt(600));
-            strike(level, b, d.stage);
+            callStrike(level, d, b);
         }
     }
 
@@ -454,16 +454,33 @@ public final class RaidManager {
         return d.squads.values().stream().anyMatch(s -> s.base.equals(b.id) && s.roles.contains(Role.ARTILLERYMAN));
     }
 
-    /** Shells land around a defender (or the home) with a fresh random offset each time. Stage 4: more shells, tighter. */
-    static void strike(ServerLevel level, Base b, int stage) {
+    /**
+     * An airstrike is due. An artilleryman out on a raid (preferably one who can see a player) fires a flare and the
+     * shells follow on what he sees; with none in the field, the camp's guns fire blind on the home area.
+     */
+    static void callStrike(ServerLevel level, RaidData d, Base b) {
+        RaiderEntity spotter = null;
+        for (Squad s : d.squads.values())
+            if (s.base.equals(b.id) && (s.kind == Kind.RAID || s.kind == Kind.NIGHT) && s.state != State.RETREAT)
+                for (UUID u : s.live)
+                    if (level.getEntity(u) instanceof RaiderEntity e && e.role() == Role.ARTILLERYMAN && e.isAlive() && e.strikeAt < 0
+                            && (spotter == null || spotter.spotted() == null && e.spotted() != null)) spotter = e;
+        if (spotter != null) spotter.signal();
+        else {
+            strike(level, b, d.stage, null);
+            tell(level, b, "The raiders called an airstrike from the " + direction(b.home, b.camp) + "! Take cover!", ChatFormatting.DARK_RED);
+        }
+    }
+
+    /** Shells land around `seen` (else a defender near home, else the home) with a fresh random offset each time. Stage 4: more shells, tighter. */
+    static void strike(ServerLevel level, Base b, int stage, @Nullable Vec3 seen) {
         List<ServerPlayer> targets = b.members.stream().map(u -> level.getServer().getPlayerList().getPlayer(u))
                 .filter(p -> p != null && p.level() == level && horizontalDist(p.position(), Vec3.atCenterOf(b.home)) < 64).toList();
-        Vec3 aim = targets.isEmpty() ? groundNear(level, b.home, 6) : targets.get(level.random.nextInt(targets.size())).position();
+        Vec3 aim = seen != null ? seen : targets.isEmpty() ? groundNear(level, b.home, 6) : targets.get(level.random.nextInt(targets.size())).position();
         double off = stage >= 4 ? 4 : 10, spread = stage >= 4 ? 4 : 8;
         aim = aim.add(Mth.nextDouble(level.random, -off, off), 0, Mth.nextDouble(level.random, -off, off));
         int shells = stage >= 4 ? 3 + level.random.nextInt(2) : 2;
         Artillery.airstrike(level, aim, Vec3.atCenterOf(b.camp).subtract(aim), shells, spread, level.random);
-        tell(level, b, "The raiders called an airstrike from the " + direction(b.home, b.camp) + "! Take cover!", ChatFormatting.DARK_RED);
     }
 
     // ---------------------------------------------------------------- patrols
@@ -569,11 +586,11 @@ public final class RaidManager {
             case ATTACK -> {
                 if (!nightRaid && d.stage >= 3 && !s.airstrike && mat && t - s.stateSince > 300 && artilleryAlive(d, b) && scouted(d, b)) {
                     s.airstrike = true;
-                    strike(level, b, d.stage);
+                    callStrike(level, d, b);
                 }
                 if (losing(level, s)) {
                     enter(s, State.RETREAT, t);
-                    tell(level, b, who + (s.leaderless() ? ", leaderless, breaks" : " is losing and pulls") + " back to their camp!", ChatFormatting.GREEN);
+                    tell(level, b, who + (s.leaderless() ? ", leaderless, " + (nightRaid ? "breaks" : "break") : nightRaid ? " is losing and pulls" : " are losing and pull") + " back to their camp!", ChatFormatting.GREEN);
                 } else if (!mat || !nightRaid && (t - s.stateSince > ATTACK_TIMEOUT || s.stolen >= 2 * s.count()
                         || s.stolen > 0 && t - s.lastSteal > 600)) { // day raid: took something and found nothing more for 30 s
                     enter(s, State.RETREAT, t);
@@ -753,7 +770,11 @@ public final class RaidManager {
                 e.tools.add(e.weapon);
                 e.tools.add(new ItemStack(tier(stage, r, Items.STONE_AXE, Items.IRON_AXE, Items.DIAMOND_AXE)));
             }
-            case LEADER, ARTILLERYMAN -> e.bow = new ItemStack(Items.BOW);
+            case LEADER -> e.bow = new ItemStack(Items.BOW);
+            case ARTILLERYMAN -> {
+                e.bow = new ItemStack(Items.BOW);
+                e.special = new ItemStack(Items.SPYGLASS); // spots for the guns
+            }
             case DEMOMAN -> {
                 e.special = new ItemStack(Items.TNT);
                 e.tnt = intel ? 4 : 2;

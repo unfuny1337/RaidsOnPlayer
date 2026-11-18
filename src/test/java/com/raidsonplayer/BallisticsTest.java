@@ -18,4 +18,22 @@ class BallisticsTest {
             for (int i = 0; i < 3; i++) assertEquals(c[1][i], end[i], 0.05);
         }
     }
+
+    @Test
+    void thrownTntLandsOnTarget() {
+        double[][] cases = {{10, -1.6, 0}, {-4, 2, 3}, {12, -5, -9}};
+        for (double[] c : cases) {
+            int ticks = 24;
+            double[] v = Ballistics.throwTnt(c[0], c[1], c[2], ticks);
+            double x = 0, y = 0, z = 0;
+            for (int t = 0; t < ticks; t++) { // PrimedTnt.tick in the air
+                v[1] -= Ballistics.TNT_GRAVITY;
+                x += v[0]; y += v[1]; z += v[2];
+                for (int i = 0; i < 3; i++) v[i] *= Ballistics.TNT_DRAG;
+            }
+            assertEquals(c[0], x, 1e-6);
+            assertEquals(c[1], y, 1e-6);
+            assertEquals(c[2], z, 1e-6);
+        }
+    }
 }

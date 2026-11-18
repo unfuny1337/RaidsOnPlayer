@@ -4,8 +4,11 @@ import com.raidsonplayer.RaidData.Base;
 import com.raidsonplayer.RaidData.Kind;
 import com.raidsonplayer.RaidData.Squad;
 import com.raidsonplayer.RaidData.State;
+import it.unimi.dsi.fastutil.ints.IntList;
+import net.minecraft.ChatFormatting;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
@@ -16,9 +19,11 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.tags.BlockTags;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.damagesource.DamageSource;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
@@ -34,12 +39,16 @@ import net.minecraft.world.entity.monster.AbstractIllager;
 import net.minecraft.world.entity.monster.Pillager;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.projectile.AbstractArrow;
+import net.minecraft.world.entity.projectile.FireworkRocketEntity;
 import net.minecraft.world.entity.projectile.ProjectileUtil;
 import net.minecraft.world.entity.raid.Raider;
+import net.minecraft.world.entity.vehicle.Boat;
 import net.minecraft.world.item.BowItem;
 import net.minecraft.world.item.CrossbowItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.component.FireworkExplosion;
+import net.minecraft.world.item.component.Fireworks;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.*;
@@ -83,6 +92,16 @@ public class RaiderEntity extends Pillager {
     @Nullable Vec3 bombAt; // a squad mate lit TNT here: get clear until fleeUntil
     int fleeUntil;
 
+    // Smarts. Times are in this raider's own tickCount.
+    boolean unreachable;          // the target can't be walked to (up a pillar, on a wall): bows come out, diggers undermine
+    int throwAt;                  // demoman: earliest next TNT throw
+    @Nullable Vec3 lastTargetPos; // leader: where the target was a second ago (is it running?)
+    int flankSide, flankUntil;    // a flank order from the leader: run past the target on this side (-1/1)
+    @Nullable Vec3 flankDir;      // which way the target is running
+    @Nullable Boat boat;          // the boat the leader put in for this raider
+    int boatUntil, boatsAt, landing; // board by; leader: next launch; ticks the boat has been grounded
+    int strikeAt = -1;            // artilleryman: his flare's shells land at this tick
+
     public RaiderEntity(EntityType<? extends Pillager> type, Level level) {
         super(type, level);
         if (getNavigation() instanceof GroundPathNavigation nav) nav.setCanOpenDoors(true);
@@ -107,17 +126,23 @@ public class RaiderEntity extends Pillager {
         // Replaces Pillager/Raider/Patrol goals entirely: no vanilla raid or patrol behaviour.
         goalSelector.addGoal(0, new FloatGoal(this));
         goalSelector.addGoal(0, new FleeBombGoal());
+        goalSelector.addGoal(0, new BoardGoal()); // beats the retreat march too
         goalSelector.addGoal(1, new AvoidEntityGoal<>(this, Player.class, 16, 1.0, 1.35) {
             @Override public boolean canUse() { return role() == Role.SCOUT && super.canUse(); } // scouts run, they don't fight
+        });
+        goalSelector.addGoal(1, new AvoidEntityGoal<>(this, Player.class, 8, 1.0, 1.3) {
+            @Override public boolean canUse() { return role() == Role.ARTILLERYMAN && super.canUse(); } // keeps his distance, shoots from there
         });
         goalSelector.addGoal(1, new MarchGoal(true));
         goalSelector.addGoal(1, new UseMechanismGoal()); // beats melee: a raider pressed against a wall goes for the lever
         goalSelector.addGoal(1, new BreachGoal());
         goalSelector.addGoal(1, new DigGoal());
+        goalSelector.addGoal(1, new FlankGoal());
         goalSelector.addGoal(2, new RangedBowAttackGoal<>(this, 1.0, 25, 16.0F));
         goalSelector.addGoal(2, new RangedCrossbowAttackGoal<>(this, 1.0, 8.0F));
         goalSelector.addGoal(2, new MeleeAttackGoal(this, 1.1, false) {
             @Override public boolean canUse() { return !holdingRanged() && super.canUse(); }
+            @Override public boolean canContinueToUse() { return !holdingRanged() && super.canContinueToUse(); } // switched to the bow
         });
         goalSelector.addGoal(4, new WatchGoal());
         goalSelector.addGoal(4, new StealGoal());
@@ -179,15 +204,20 @@ public class RaiderEntity extends Pillager {
         super.tick();
         if (level().isClientSide) return;
         if (retreating() && getTarget() != null) setTarget(null); // pack alerts bypass target goals
+        if (getVehicle() instanceof Boat b) ride(b);
+        if (tickCount % 20 == 5) unreachable = getTarget() != null && !isPassenger() && distanceToSqr(getTarget()) < 16 * 16 && !reachable(getTarget());
         if (tickCount % 10 == 0) updateHands();
-        if (tickCount % 20 == 0 && role() == Role.LEADER && getTarget() != null) shareTarget();
+        if (tickCount % 20 == 0 && role() == Role.LEADER) lead();
+        if (tickCount % 20 == 10 && role() == Role.LEADER && !isPassenger() && tickCount >= boatsAt) launchBoats();
+        if (tickCount % 5 == 0 && role() == Role.DEMOMAN && tickCount >= throwAt) throwTnt();
+        if (strikeAt >= 0 && tickCount >= strikeAt) callInStrike();
         if (tickCount % 100 == 0) {
             Squad s = squad();
             Base b = s == null ? null : base(s);
-            boolean wantsToMove = b != null && switch (s.state) {
+            boolean wantsToMove = b != null && !isPassenger() && switch (s.state) {
                 case GARRISON -> getTarget() != null && distanceToSqr(getTarget()) > 9; // defenders open their own gate
                 case OUTBOUND, RETREAT -> true;
-                case ATTACK -> s.kind != Kind.SCOUT && (stealing || getTarget() != null && distanceToSqr(getTarget()) > 9
+                case ATTACK -> s.kind != Kind.SCOUT && (stealing || getTarget() != null && (distanceToSqr(getTarget()) > 9 || unreachable)
                         || cutOff(RaidManager.dest(s, b)));
             };
             stuck = wantsToMove && lastCheck != null && position().distanceTo(lastCheck) < 1.5;
@@ -206,23 +236,184 @@ public class RaiderEntity extends Pillager {
         return p == null || !p.canReach();
     }
 
-    /** The leader calls targets: squad mates with nothing to do join his fight. */
-    private void shareTarget() {
-        Squad s = squad();
-        if (s == null) return;
-        for (UUID u : s.live)
-            if (((ServerLevel) level()).getEntity(u) instanceof RaiderEntity m && m != this && m.getTarget() == null
-                    && m.fights() && m.distanceToSqr(this) < 24 * 24) m.setTarget(getTarget());
+    private boolean reachable(LivingEntity t) {
+        Path p = getNavigation().createPath(t, 1);
+        return p != null && p.canReach();
     }
 
-    /** Puts the right item in hand: a tool while digging, the bow at range, TNT or the spyglass when not fighting. */
+    List<RaiderEntity> mates(Squad s, double r) {
+        List<RaiderEntity> out = new ArrayList<>();
+        for (UUID u : s.live)
+            if (((ServerLevel) level()).getEntity(u) instanceof RaiderEntity m && m != this && m.isAlive() && m.distanceToSqr(this) < r * r) out.add(m);
+        return out;
+    }
+
+    /**
+     * The leader runs the squad: mates with nothing to do join his fight, and when the target runs he sends them past
+     * it on both sides (every third one keeps chasing straight) so it can't simply outrun them. Without him: none of this.
+     */
+    private void lead() {
+        Squad s = squad();
+        LivingEntity t = getTarget();
+        if (s == null || t == null || !fights()) { lastTargetPos = null; return; }
+        Vec3 run = lastTargetPos == null ? Vec3.ZERO : t.position().subtract(lastTargetPos).multiply(1, 0, 1); // blocks in the last second
+        lastTargetPos = t.position();
+        Vec3 to = t.position().subtract(position()).multiply(1, 0, 1);
+        boolean fleeing = t instanceof Player && run.length() > 3 && to.length() > 6 && to.length() < 40 && run.normalize().dot(to.normalize()) > 0.3;
+        boolean newOrder = false;
+        int i = 0;
+        for (RaiderEntity m : mates(s, 32)) {
+            if (!m.fights()) continue;
+            if (m.getTarget() == null) m.setTarget(t);
+            if (!fleeing || m.getTarget() != t || m.role() == Role.ARTILLERYMAN) continue;
+            newOrder |= m.tickCount > m.flankUntil;
+            m.flankSide = new int[]{1, -1, 0}[i++ % 3];
+            m.flankDir = run.normalize();
+            m.flankUntil = m.tickCount + 50;
+        }
+        if (newOrder) {
+            playSound(SoundEvents.PILLAGER_CELEBRATE, 2f, 0.8f); // "cut him off!"
+            RaidsOnPlayer.LOG.debug("Leader orders a flank on {} running {}", t.getName().getString(), run);
+        }
+    }
+
+    /**
+     * Demoman with no wall to blow: lobs TNT at a target he can see 5-16 blocks off. On the way to a base he keeps one
+     * stick for the breach. (Walls hide the target, so behind one he breaches instead.)
+     */
+    private void throwTnt() {
+        LivingEntity t = getTarget();
+        Squad s = squad();
+        int keep = s != null && (s.kind == Kind.RAID || s.kind == Kind.NIGHT) && s.state == State.OUTBOUND ? 1 : 0;
+        if (t == null || tnt <= keep || isPassenger() || retreating()) return;
+        double d = distanceTo(t);
+        if (d < 5 || d > 16 || !hasLineOfSight(t)) return;
+        int ticks = (int) Mth.clamp(d * 2, 14, 30);
+        Vec3 from = getEyePosition();
+        double[] v = Ballistics.throwTnt(t.getX() - from.x, t.getY() - from.y, t.getZ() - from.z, ticks);
+        PrimedTnt bomb = new PrimedTnt(level(), from.x, from.y, from.z, this);
+        bomb.setDeltaMovement(v[0], v[1], v[2]);
+        bomb.setFuse(ticks + 10); // lands, then a short hiss
+        level().addFreshEntity(bomb);
+        level().playSound(null, bomb.getX(), bomb.getY(), bomb.getZ(), SoundEvents.TNT_PRIMED, SoundSource.HOSTILE, 1.0F, 1.0F);
+        getLookControl().setLookAt(t);
+        swing(InteractionHand.MAIN_HAND);
+        tnt--;
+        throwAt = tickCount + 60 + getRandom().nextInt(40);
+        RaidsOnPlayer.LOG.debug("Demoman threw TNT at {} from {} blocks", t.getName().getString(), (int) d);
+    }
+
+    /** The water block at the surface of this column, or null if it isn't open water. */
+    @Nullable private BlockPos surfaceWater(Vec3 at) {
+        BlockPos top = level().getHeightmapPos(Heightmap.Types.MOTION_BLOCKING, BlockPos.containing(at)).below();
+        return level().getFluidState(top).is(FluidTags.WATER) && level().getBlockState(top.above()).isAir() ? top : null;
+    }
+
+    private boolean afloat(Boat b) {
+        return !level().getFluidState(b.blockPosition()).isEmpty() || !level().getFluidState(b.blockPosition().below()).isEmpty();
+    }
+
+    /**
+     * Leader at the water's edge with open water ahead on the way: puts in boats for the squad (two to a boat), reusing
+     * empty ones already floating ahead. Each mate is told which boat is his.
+     */
+    private void launchBoats() {
+        Squad s = squad();
+        Vec3 goal = moveGoal();
+        if (s == null || goal == null) return;
+        Vec3 dir = goal.subtract(position()).multiply(1, 0, 1);
+        if (dir.length() < 12) return;
+        Vec3 fwd = dir.normalize(), side = new Vec3(-fwd.z, 0, fwd.x);
+        int water = 0;
+        for (int k = 1; k <= 10; k++) if (surfaceWater(position().add(fwd.scale(k))) != null) water++;
+        if (water < 6 || surfaceWater(position().add(fwd.scale(2))) == null && surfaceWater(position().add(fwd.scale(3))) == null) return;
+        List<RaiderEntity> crew = new ArrayList<>(List.of(this));
+        for (RaiderEntity m : mates(s, 24)) if (!m.isPassenger()) crew.add(m);
+        List<Boat> boats = new ArrayList<>(level().getEntitiesOfClass(Boat.class, getBoundingBox().inflate(12),
+                x -> x.getPassengers().isEmpty() && afloat(x) && x.position().subtract(position()).dot(fwd) > 0
+                        && level().getEntitiesOfClass(RaiderEntity.class, x.getBoundingBox().inflate(32), m -> m.boat == x).isEmpty())); // not another squad's
+        for (int k = 1; k <= 5 && boats.size() * 2 < crew.size(); k++)
+            for (int o = -4; o <= 4 && boats.size() * 2 < crew.size(); o += 2) {
+                BlockPos w = surfaceWater(position().add(fwd.scale(k)).add(side.scale(o)));
+                if (w == null || boats.stream().anyMatch(x -> x.distanceToSqr(Vec3.atCenterOf(w)) < 2.5 * 2.5)) continue;
+                Boat boat = new Boat(level(), w.getX() + 0.5, w.getY() + 1, w.getZ() + 0.5);
+                boat.setYRot((float) (Mth.atan2(fwd.z, fwd.x) * Mth.RAD_TO_DEG) - 90f);
+                level().addFreshEntity(boat);
+                boats.add(boat);
+            }
+        if (boats.isEmpty()) return;
+        boatsAt = tickCount + 600;
+        for (int i = 0; i < crew.size() && i / 2 < boats.size(); i++) {
+            crew.get(i).boat = boats.get(i / 2);
+            crew.get(i).boatUntil = crew.get(i).tickCount + 300;
+        }
+        level().playSound(null, blockPosition(), SoundEvents.WOOD_PLACE, SoundSource.HOSTILE, 1f, 0.8f);
+        RaidsOnPlayer.LOG.debug("Leader at {} has {} boats for {} raiders", blockPosition(), boats.size(), crew.size());
+    }
+
+    /** Vanilla boats grab any mob that bumps them: a raider only gets into the one his leader gave him. */
+    @Override
+    public boolean startRiding(Entity vehicle, boolean force) {
+        return (!(vehicle instanceof Boat) || vehicle == boat) && super.startRiding(vehicle, force);
+    }
+
+    /** In a boat: the first one in rows toward where the squad is going; everyone gets out at the far shore. */
+    private void ride(Boat b) {
+        Vec3 goal = moveGoal();
+        float yaw = b.getYRot() * Mth.DEG_TO_RAD;
+        Vec3 fwd = new Vec3(-Mth.sin(yaw), 0, Mth.cos(yaw));
+        BlockPos ahead = BlockPos.containing(b.position().add(fwd.scale(1.5)));
+        boolean shore = b.horizontalCollision && level().getFluidState(ahead).isEmpty() && level().getFluidState(ahead.below()).isEmpty();
+        landing = shore || !afloat(b) ? landing + 1 : 0;
+        if (goal == null || boat != b || landing > 5 || tickCount > boatUntil + 1200 || goal.distanceToSqr(b.position()) < 4 * 4) {
+            stopRiding();
+            boat = null;
+            landing = 0;
+            return;
+        }
+        if (b.getFirstPassenger() != this) return;
+        Vec3 d = goal.subtract(b.position());
+        float turn = Mth.wrapDegrees((float) (Mth.atan2(d.z, d.x) * Mth.RAD_TO_DEG) - 90f - b.getYRot());
+        b.setYRot(b.getYRot() + Mth.clamp(turn, -5f, 5f));
+        b.setDeltaMovement(b.getDeltaMovement().add(fwd.scale(Math.abs(turn) < 45 ? 0.04 : 0.01))); // a player's paddle push
+        b.setPaddleState(true, true);
+    }
+
+    /** A player this raider can see within 64 blocks: what an artilleryman calls the shells onto. */
+    @Nullable Player spotted() {
+        return level().players().stream().filter(p -> !p.isSpectator() && distanceToSqr(p) < 64 * 64 && hasLineOfSight(p))
+                .min(Comparator.comparingDouble(this::distanceToSqr)).orElse(null);
+    }
+
+    /** Artilleryman: fires a red flare; the shells land 3 s later on whoever he can see then. Kill him first and they never come. */
+    void signal() {
+        ItemStack flare = new ItemStack(Items.FIREWORK_ROCKET);
+        flare.set(DataComponents.FIREWORKS, new Fireworks(1, List.of(new FireworkExplosion(FireworkExplosion.Shape.LARGE_BALL, IntList.of(0xB02E26), IntList.of(), true, false))));
+        level().addFreshEntity(new FireworkRocketEntity(level(), getX(), getEyeY(), getZ(), flare));
+        swing(InteractionHand.MAIN_HAND);
+        strikeAt = tickCount + 60;
+        Squad s = squad();
+        Base b = s == null ? null : base(s);
+        if (b != null) RaidManager.tell((ServerLevel) level(), b, "A raider artilleryman fired a flare: shells incoming! Kill him or take cover!", ChatFormatting.DARK_RED);
+    }
+
+    private void callInStrike() {
+        strikeAt = -1;
+        Squad s = squad();
+        Base b = s == null ? null : base(s);
+        Player p = spotted();
+        if (b != null) RaidManager.strike((ServerLevel) level(), b, RaidData.get(((ServerLevel) level()).getServer()).stage, p == null ? null : p.position());
+    }
+
+    /** Puts the right item in hand: a tool while digging, the bow at range or out of reach, TNT or the spyglass when not fighting. */
     void updateHands() {
         LivingEntity t = getTarget();
         double d = t == null ? Double.MAX_VALUE : distanceToSqr(t);
         ItemStack hand = getMainHandItem();
         ItemStack want = digTool != null ? digTool : switch (role()) {
             case SCOUT -> watching ? special : weapon;
-            case LEADER, ARTILLERYMAN -> t == null ? weapon : d > 7 * 7 ? bow : d < 5 * 5 ? weapon : hand; // keep the hand in between
+            case LEADER -> t == null ? weapon : unreachable || d > 7 * 7 ? bow : d < 5 * 5 ? weapon : hand; // keep the hand in between
+            case ARTILLERYMAN -> t != null ? bow : watching ? special : weapon; // keeps his distance: never closes in with the sword
             case DEMOMAN -> tnt > 0 && d > 4 * 4 ? special : weapon;
             default -> weapon;
         };
@@ -504,6 +695,17 @@ public class RaiderEntity extends Pillager {
         }
 
         private boolean plan(Vec3 goal) {
+            LivingEntity t = getTarget();
+            if (t != null && unreachable && t.getY() > getY() + 1.5) { // up a pillar or on a wall: take the ground from under him
+                BlockPos under = t.getOnPos();
+                if (getEyePosition().distanceToSqr(Vec3.atCenterOf(under)) < 4.5 * 4.5 && canBreak(under, level().getBlockState(under))) {
+                    plan.clear();
+                    plan.add(under);
+                    next = null;
+                    RaidsOnPlayer.LOG.debug("{} undermines {} at {}", role(), t.getName().getString(), under);
+                    return true;
+                }
+            }
             BlockPos feet = blockPosition();
             Direction f = Direction.getNearest(goal.x - getX(), 0, goal.z - getZ());
             if (f.getAxis().isVertical()) return false;
@@ -537,7 +739,7 @@ public class RaiderEntity extends Pillager {
         }
 
         @Override public void start() { idx = 0; ticks = 0; settle = 0; progress = 0; failed = false; getNavigation().stop(); }
-        @Override public boolean canContinueToUse() { return !failed && ticks < 600 && settle < 30; }
+        @Override public boolean canContinueToUse() { return !failed && ticks < 600 && settle < 30 && (next != null || idx < plan.size()); }
 
         @Override
         public void stop() {
@@ -552,6 +754,7 @@ public class RaiderEntity extends Pillager {
         public void tick() {
             ticks++;
             if (idx >= plan.size()) { // cleared: step into the gap
+                if (next == null) return; // undermined: nowhere to step
                 if (settle++ == 0) getNavigation().moveTo(next.getX() + 0.5, next.getY(), next.getZ() + 0.5, 1.0);
                 if (settle == 10) getMoveControl().setWantedPosition(next.getX() + 0.5, next.getY(), next.getZ() + 0.5, 1.0);
                 return;
@@ -559,7 +762,7 @@ public class RaiderEntity extends Pillager {
             BlockPos p = plan.get(idx);
             BlockState st = level().getBlockState(p);
             if (passable(level(), p, st)) { idx++; progress = 0; return; }
-            if (!canBreak(p, st)) { failed = true; return; }
+            if (!canBreak(p, st) || getEyePosition().distanceToSqr(Vec3.atCenterOf(p)) > 5 * 5) { failed = true; return; } // knocked away from it
             getLookControl().setLookAt(Vec3.atCenterOf(p));
             ItemStack tool = bestTool(st);
             if (digTool != tool) { digTool = tool; updateHands(); }
@@ -668,29 +871,87 @@ public class RaiderEntity extends Pillager {
         }
     }
 
-    /** Scout on watch: stands at his watch point looking at the base through a spyglass. */
+    /**
+     * Spotting through a spyglass: a scout at his watch point, or an artilleryman on a raid hanging back 22 blocks on
+     * the camp side of the target (he fights only with the bow, from range).
+     */
     class WatchGoal extends Goal {
+        private Vec3 lookAt = Vec3.ZERO;
+
         WatchGoal() { setFlags(EnumSet.of(Flag.MOVE, Flag.LOOK)); }
 
-        @Nullable private Squad watch() {
+        @Nullable private Vec3 post() {
             Squad s = squad();
-            return role() == Role.SCOUT && s != null && s.kind == Kind.SCOUT && s.state == State.ATTACK ? s : null;
+            Base b = s == null ? null : base(s);
+            if (b == null || b.camp == null) return null;
+            if (role() == Role.SCOUT && s.kind == Kind.SCOUT && s.state == State.ATTACK && s.target != null) {
+                lookAt = Vec3.atCenterOf(b.home).add(0, 2, 0);
+                return Vec3.atBottomCenterOf(level().getHeightmapPos(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, s.target));
+            }
+            if (role() != Role.ARTILLERYMAN || getTarget() != null || s.kind != Kind.RAID && s.kind != Kind.NIGHT) return null;
+            Vec3 dest = Vec3.atBottomCenterOf(RaidManager.dest(s, b));
+            if (s.state != State.ATTACK && !(s.state == State.OUTBOUND && distanceToSqr(dest) < 40 * 40)) return null;
+            lookAt = dest.add(0, 2, 0);
+            Vec3 back = Vec3.atBottomCenterOf(b.camp).subtract(dest).multiply(1, 0, 1).normalize();
+            for (int r : new int[]{22, 18, 26, 14, 30}) { // dry ground only
+                BlockPos p = level().getHeightmapPos(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, BlockPos.containing(dest.add(back.scale(r))));
+                if (level().getFluidState(p.below()).isEmpty()) return Vec3.atBottomCenterOf(p);
+            }
+            return null;
         }
 
-        @Override public boolean canUse() { return watch() != null; }
+        @Override public boolean canUse() { return post() != null; }
         @Override public void stop() { watching = false; }
 
         @Override
         public void tick() {
-            Squad s = watch();
-            Base b = s == null ? null : base(s);
-            if (b == null || s.target == null) return;
-            Vec3 post = Vec3.atBottomCenterOf(level().getHeightmapPos(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, s.target));
+            Vec3 post = post();
+            if (post == null) return;
             boolean there = distanceToSqr(post) < 3 * 3;
             if (!there && (tickCount % 40 == 0 || getNavigation().isDone())) getNavigation().moveTo(post.x, post.y, post.z, 1.0);
             if (there) getNavigation().stop();
             watching = there;
-            getLookControl().setLookAt(Vec3.atCenterOf(b.home).add(0, 2, 0));
+            getLookControl().setLookAt(lookAt);
+        }
+    }
+
+    /** A flank order from the leader: run past the running target on one side to cut it off, then close in. */
+    class FlankGoal extends Goal {
+        FlankGoal() { setFlags(EnumSet.of(Flag.MOVE)); }
+
+        @Override
+        public boolean canUse() {
+            LivingEntity t = getTarget();
+            return flankSide != 0 && flankDir != null && tickCount < flankUntil && t != null && distanceToSqr(t) > 5 * 5 && fights();
+        }
+
+        @Override public void stop() { flankSide = 0; }
+
+        @Override
+        public void tick() {
+            if (tickCount % 10 != 0 && !getNavigation().isDone()) return;
+            LivingEntity t = getTarget();
+            double d = distanceTo(t);
+            Vec3 p = t.position().add(flankDir.scale(Math.min(10, d * 0.6))).add(new Vec3(-flankDir.z, 0, flankDir.x).scale(flankSide * Math.min(7, d * 0.5)));
+            getNavigation().moveTo(p.x, p.y, p.z, 1.25);
+        }
+    }
+
+    /** Get into the boat the leader put in for us. */
+    class BoardGoal extends Goal {
+        BoardGoal() { setFlags(EnumSet.of(Flag.MOVE)); }
+
+        @Override
+        public boolean canUse() {
+            if (boat == null || isPassenger()) return false;
+            if (!boat.isAlive() || tickCount > boatUntil || boat.getPassengers().size() >= 2) { boat = null; return false; }
+            return getTarget() == null || distanceToSqr(getTarget()) > 12 * 12;
+        }
+
+        @Override
+        public void tick() {
+            if (distanceToSqr(boat) < 2.5 * 2.5) startRiding(boat);
+            else if (tickCount % 10 == 0 || getNavigation().isDone()) getNavigation().moveTo(boat, 1.1);
         }
     }
 

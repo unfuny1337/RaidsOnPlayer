@@ -14,6 +14,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.minecraft.world.entity.item.PrimedTnt;
 import net.minecraft.world.entity.monster.Pillager;
 import net.minecraft.world.entity.player.Player;
 import net.neoforged.bus.api.IEventBus;
@@ -27,6 +28,7 @@ import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
 import net.neoforged.neoforge.event.entity.player.AdvancementEvent;
 import net.neoforged.neoforge.event.entity.player.CanContinueSleepingEvent;
 import net.neoforged.neoforge.event.entity.player.CanPlayerSleepEvent;
+import net.neoforged.neoforge.event.level.ExplosionEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import net.neoforged.neoforge.registries.DeferredHolder;
 import net.neoforged.neoforge.registries.DeferredRegister;
@@ -65,6 +67,11 @@ public class RaidsOnPlayer {
                         src.getEntity() == null ? null : src.getEntity().getType().toShortString());
                 RaidManager.onDeath(r);
             }
+        });
+        // Raider TNT (thrown or breaching) still hurts, but leaves blocks alone when raider griefing is off.
+        NeoForge.EVENT_BUS.addListener((ExplosionEvent.Detonate e) -> {
+            if (e.getExplosion().getDirectSourceEntity() instanceof PrimedTnt t && t.getOwner() instanceof RaiderEntity r && !r.canGrief())
+                e.getAffectedBlocks().clear();
         });
         NeoForge.EVENT_BUS.addListener(RaidsOnPlayer::commands);
         // No sleeping through a night raid: the horn wakes you, and the bed refuses you until it is over.

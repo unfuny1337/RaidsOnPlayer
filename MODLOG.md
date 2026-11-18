@@ -299,5 +299,52 @@ Verified in game: killing a leader as the player (`/damage ... by Dev`) gave +6 
 the night cooldown 137 -> 131; a raider removed with /kill gave none. With chance 0 and step 0.5: after skipping the cooldown the
 mornings went 50% -> 100% -> planned, and the cooldown restarted at 139 points.
 
+## Raiders in boats, more scouts, raids when away (2026-11-18)
+Request: scouting more common; raiders must actually sit in the boats ("empty boats crossing water and raiders teleporting");
+a config option to enable/disable raids when the player is not home.
+- Boats: `RaiderEntity.startRiding` only let a raider into "his" boat, but the client seats passengers through the same method
+  (`ClientPacketListener.handleSetEntityPassengersPacket` -> `startRiding(vehicle, true)`) and `boat` is server-only, so the
+  client refused: the boat moved empty while the raider stood frozen (the server sends no position for passengers), then
+  "teleported" on landing. The check is now server-side only.
+- Scouts: `scoutChance` (0.4): each morning (the patrol roll) a base with no night planned and no scout out gets a scout due
+  (`scoutSent = false`); `tickNightPlan` sends a due scout any day someone is home, not only on planned nights. New bases start
+  with no scout due.
+- `raidsWhenAway` (false). Off: day raids need a member within 128 (as before); a night raid waits at dusk until a member is
+  near the target home (all night, and the nights after, with a fresh scout each day); full raids call off as before. On: day
+  and night raids launch at bases with members even if nobody is home or online; a RAID/NIGHT squad within 48 of its target
+  keeps a region ticket (`RAID_TICKET`, 5x5 entity-ticking chunks) so it materializes and raids an empty base; on arrival
+  it waits for the chunks instead of turning back (peaceful: turns back). Full raids still need a defender.
+- No friendly fire (user: "artilleryman doesn't airstrike and cannons dont shoot if theres teammates nearby the target"):
+  `RaidManager.friendsNear(aim, r)` = any RaiderEntity within r horizontally (±48 in height). A CBC HE shell has entity
+  explosive power 12 (`munition_properties/projectiles/he_shell.json`), so it hurts out to 24 blocks; `BLAST` = 14.
+  Airstrikes (`strikeAim`): up to 4 random aims around the target, the first with no raider within spread*1.5 + 14
+  (26 at stage 3, 20 at stage 4); none -> no strike. `callStrike` returns false then; night strikes are not used up and
+  retry every second, day/full raid squads keep `airstrike` false and retry. A flare's shells are re-checked on impact
+  ("The artilleryman held his fire..."). Tower cannons: no raider within 14 of the aim, else retry in 5 s.
+  `/rop fire` and `/rop airstrike` (test commands) are not checked.
+Verified in game: boats (server: raiders counted as passengers of boats crossing the channel many times; client: a raider
+seated in a boat, seen behind the pause menu). raidsWhenAway on, player 4000+ blocks away: `/rop raid` launched,
+materialized at the empty base ("The raiders have reached your base!"). Off: `/rop night launch` with the player away
+kept "night raid planned" with no squads; teleporting home at night launched it within a second.
+Test-world note: the -302,2188 stage 4 camp's gate bridge had been broken by earlier explosions and its lava moat flowed
+onto it, so outgoing leaders burned to death (rebuilt with `/rop rebuild`).
+
+## Camps blend into the terrain (2026-11-18)
+Request: "can you make structures blend in terrain better?" Before: `flatten` cut a flat disc (radius h+13) with
+vertical edges, so camps sat on a dirt plinth or in a pit; the floor height was the ground at the centre.
+- `trySite` puts the floor at the median of its 25 ground samples (less cut and fill, robust to a tree trunk sample).
+- `flatten`: inside the disc as before, but it also clears ground higher than `height`. Around it a `BLEND` = 12 ring is
+  eased (smoothstep) from the floor to the natural ground: cut columns are cleared (with plants and trunks on them),
+  fill columns built up with the biome's under-block; each column keeps its own surface block (sand stays sand).
+  `groundTop` finds the ground under trees, plants and water; it skips (leaves alone) lava, block entities and anything
+  built: a column only counts if the ground is terrain (dirt/sand/stone/terracotta/snow/gravel/clay/ice tags or the
+  biome's own blocks), and logs only as trees under leaves. Water: the slope continues under it as a bank (filled,
+  under-block on top below the surface); lake beds are never dug out. Snow covers the ring too.
+- Spacing check: camps are >= 72 apart and the ring reaches radius + 12 <= 42, so it never reaches a neighbour's walls
+  (<= ~22 from its centre).
+Verified in game (screenshots): the jungle camp at 1880,70,-1842 (built on a plinth by the old code) rebuilt onto an
+eased hill; first try left a dirt cliff where the slope met a lake (water columns were skipped), fixed by banking into
+water. Two new expansion camps (1809,72,-1899 and 1819,67,-1773) sit on gentle mounds in a jungle and a birch forest.
+
 ## Next step
 Install into the user's instance (ask first; the instance is missing ritchiesprojectilelib). Push the branch when asked. Next ideas: sleep-blocking check with a real player, tunnelling under obsidian, a clean flank test on untouched ground.

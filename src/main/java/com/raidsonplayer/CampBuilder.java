@@ -9,6 +9,7 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.BiomeTags;
 import net.minecraft.tags.BlockTags;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.Container;
 import net.minecraft.world.item.ItemStack;
@@ -46,21 +47,23 @@ public final class CampBuilder {
         return level.getChunk(x >> 4, z >> 4).getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x & 15, z & 15) + 1;
     }
 
-    /** Returns a base origin near x,z if the spot is dry and flat enough for an outpost, else null. Generates chunks synchronously. */
+    /**
+     * Returns a base origin near x,z if the spot is dry and flat enough for an outpost, else null. The floor goes at the
+     * median ground height around it, so the levelling cuts and fills about equally. Generates chunks synchronously.
+     */
     @Nullable
     static BlockPos trySite(ServerLevel level, int x, int z) {
-        int y = surface(level, x, z);
-        BlockPos c = new BlockPos(x, y, z);
-        if (level.getBiome(c).is(BiomeTags.IS_OCEAN) || level.getBiome(c).is(BiomeTags.IS_RIVER)) return null;
-        int min = y, max = y;
+        BlockPos at = new BlockPos(x, surface(level, x, z), z);
+        if (level.getBiome(at).is(BiomeTags.IS_OCEAN) || level.getBiome(at).is(BiomeTags.IS_RIVER)) return null;
+        List<Integer> hs = new ArrayList<>();
         for (int dx = -16; dx <= 16; dx += 8)
             for (int dz = -16; dz <= 16; dz += 8) {
                 int h = surface(level, x + dx, z + dz);
                 if (!level.getFluidState(new BlockPos(x + dx, h - 1, z + dz)).isEmpty()) return null;
-                min = Math.min(min, h);
-                max = Math.max(max, h);
+                hs.add(h);
             }
-        return max - min <= 8 ? c : null;
+        hs.sort(null);
+        return hs.get(hs.size() - 1) - hs.get(0) <= 8 ? new BlockPos(x, hs.get(hs.size() / 2), z) : null;
     }
 
     /** Builds the base for a stage, gate facing `front`, and fills its chests. Clears the footprint first (also used for rebuilds). */
@@ -108,31 +111,82 @@ public final class CampBuilder {
         return counts.entrySet().stream().max(Map.Entry.comparingByValue()).map(Map.Entry::getKey).orElse(fallback).defaultBlockState();
     }
 
-    /** Levels a disc: clears `height` blocks above the floor, fills the biome's under-block below it, its top block on top. */
+    /** Width of the slope that joins the levelled disc to the natural ground around it. */
+    static final int BLEND = 12;
+
+    /**
+     * Levels a disc: clears above the floor (at least `height` blocks, and any higher ground), fills the biome's
+     * under-block below it, its top block on top. Around it a BLEND-wide ring is cut or filled into an eased slope from
+     * the floor out to the natural ground, so the camp sits in the land instead of on a plinth or in a pit.
+     */
     static void flatten(ServerLevel level, BlockPos c, int radius, int height, Ground g) {
-        for (int cx = (c.getX() - radius) >> 4; cx <= (c.getX() + radius) >> 4; cx++)
-            for (int cz = (c.getZ() - radius) >> 4; cz <= (c.getZ() + radius) >> 4; cz++) level.getChunk(cx, cz);
+        int outer = radius + BLEND;
+        for (int cx = (c.getX() - outer) >> 4; cx <= (c.getX() + outer) >> 4; cx++)
+            for (int cz = (c.getZ() - outer) >> 4; cz <= (c.getZ() + outer) >> 4; cz++) level.getChunk(cx, cz);
         BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos();
-        for (int dx = -radius; dx <= radius; dx++)
-            for (int dz = -radius; dz <= radius; dz++) {
-                if (dx * dx + dz * dz > radius * radius) continue;
-                int x = c.getX() + dx, z = c.getZ() + dz;
-                for (int y = c.getY(); y <= c.getY() + height; y++) level.setBlock(p.set(x, y, z), Blocks.AIR.defaultBlockState(), 2);
-                int top = surface(level, x, z);
-                for (int y = Math.min(top, c.getY() - 1); y < c.getY() - 1; y++) level.setBlock(p.set(x, y, z), g.under, 2);
-                level.setBlock(p.set(x, c.getY() - 1, z), g.top, 2);
+        int floor = c.getY(); // first free block above the floor
+        for (int dx = -outer; dx <= outer; dx++)
+            for (int dz = -outer; dz <= outer; dz++) {
+                double d = Math.sqrt(dx * dx + dz * dz);
+                if (d > outer) continue;
+                int x = c.getX() + dx, z = c.getZ() + dz, top = surface(level, x, z);
+                if (d <= radius) {
+                    for (int y = floor; y <= Math.max(floor + height, top); y++) level.setBlock(p.set(x, y, z), Blocks.AIR.defaultBlockState(), 2);
+                    for (int y = Math.min(top, floor - 1); y < floor - 1; y++) level.setBlock(p.set(x, y, z), g.under, 2);
+                    level.setBlock(p.set(x, floor - 1, z), g.top, 2);
+                    continue;
+                }
+                int ground = groundTop(level, x, z, g);
+                if (ground == NONE) continue; // lava, or something built: leave it be
+                int surf = level.getHeight(Heightmap.Types.MOTION_BLOCKING, x, z); // above any water
+                boolean wet = !level.getFluidState(p.set(x, surf - 1, z)).isEmpty();
+                BlockState own = level.getBlockState(p.set(x, ground, z)); // this spot's surface (sand at a desert's edge, snow...)
+                double t = (d - radius) / BLEND;
+                t = t * t * (3 - 2 * t); // eased at both ends: no crease at the floor's edge or where the slope meets the land
+                int want = (int) Math.round(floor + (ground + 1 - floor) * t); // first free block after shaping
+                if (want <= ground) { // cut down, with the plants and tree trunks that stood on the removed ground
+                    if (wet) continue; // never dig out a lake bed
+                    for (int y = want; y < Math.max(top, ground + 3); y++) level.setBlock(p.set(x, y, z), Blocks.AIR.defaultBlockState(), 2);
+                } else for (int y = ground; y < want - 1; y++) level.setBlock(p.set(x, y, z), g.under, 2); // build up (a bank into water)
+                if (want != ground + 1) level.setBlock(p.set(x, want - 1, z), wet && want < surf ? g.under : own, 2);
             }
     }
 
-    /** Snow on open ground in cold biomes, where snowfall would put it (vanilla's own rule), not on roofs or walls. */
+    static final int NONE = Integer.MIN_VALUE;
+
+    /**
+     * y of the natural ground at x,z under trees, plants and water (a lake bed); NONE if the column is lava or built on (a
+     * fence, a farm, a log wall: logs only count as a tree under leaves).
+     */
+    static int groundTop(ServerLevel level, int x, int z, Ground g) {
+        BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos(x, level.getHeight(Heightmap.Types.MOTION_BLOCKING, x, z) - 1, z);
+        boolean canopy = false;
+        for (int i = 0; i < 48; i++, p.move(Direction.DOWN)) {
+            BlockState s = level.getBlockState(p);
+            if (s.getFluidState().is(FluidTags.LAVA) || s.hasBlockEntity()) return NONE;
+            canopy |= s.is(BlockTags.LEAVES);
+            if (s.isAir() || !s.getFluidState().isEmpty() || s.is(BlockTags.LEAVES) || canopy && s.is(BlockTags.LOGS) || s.is(BlockTags.REPLACEABLE_BY_TREES)
+                    || s.getBlock() instanceof BushBlock || s.is(Blocks.SNOW) || s.is(Blocks.CACTUS) || s.is(Blocks.SUGAR_CANE)) continue;
+            return s.is(BlockTags.DIRT) || s.is(BlockTags.SAND) || s.is(BlockTags.BASE_STONE_OVERWORLD) || s.is(BlockTags.TERRACOTTA)
+                    || s.is(BlockTags.SNOW) || s.is(Blocks.GRAVEL) || s.is(Blocks.SANDSTONE) || s.is(Blocks.RED_SANDSTONE)
+                    || s.is(Blocks.CLAY) || s.is(Blocks.ICE) || s.is(Blocks.PACKED_ICE)
+                    || s.is(g.top().getBlock()) || s.is(g.under().getBlock()) ? p.getY() : NONE;
+        }
+        return NONE;
+    }
+
+    /** Snow where snowfall would put it (vanilla's own rule) in cold biomes: open floor (not roofs or walls) and the slope around it. */
     static void snow(ServerLevel level, BlockPos c, int radius) {
         BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos();
-        for (int dx = -radius; dx <= radius; dx++)
-            for (int dz = -radius; dz <= radius; dz++) {
-                if (dx * dx + dz * dz > radius * radius) continue;
-                p.set(c.getX() + dx, c.getY(), c.getZ() + dz);
-                if (level.getHeight(Heightmap.Types.MOTION_BLOCKING, p.getX(), p.getZ()) == c.getY()
-                        && level.getBiome(p).value().shouldSnow(level, p)) level.setBlock(p, Blocks.SNOW.defaultBlockState(), 3);
+        int outer = radius + BLEND;
+        for (int dx = -outer; dx <= outer; dx++)
+            for (int dz = -outer; dz <= outer; dz++) {
+                int d2 = dx * dx + dz * dz;
+                if (d2 > outer * outer) continue;
+                p.set(c.getX() + dx, 0, c.getZ() + dz);
+                p.setY(level.getHeight(Heightmap.Types.MOTION_BLOCKING, p.getX(), p.getZ()));
+                if ((d2 > radius * radius || p.getY() == c.getY()) && level.getBiome(p).value().shouldSnow(level, p))
+                    level.setBlock(p, Blocks.SNOW.defaultBlockState(), 3);
             }
     }
 

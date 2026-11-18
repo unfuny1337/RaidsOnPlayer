@@ -95,7 +95,7 @@ public class RaidsOnPlayer {
                     Base b = RaidManager.baseOf(data(c.getSource()), c.getSource().getPlayerOrException());
                     if (b == null) { c.getSource().sendFailure(Component.literal("You have no base (set a bed in the overworld).")); return 0; }
                     b.nextRaid = 0;
-                    c.getSource().sendSuccess(() -> Component.literal("Raid due now (starts if the camp has 2+ raiders and you are within 128 blocks of home)."), false);
+                    c.getSource().sendSuccess(() -> Component.literal("Raid due now (starts if the camp has 2+ raiders and you are within 128 blocks of home, or raidsWhenAway is on)."), false);
                     return 1;
                 }))
                 .then(Commands.literal("rebuild").executes(c -> {

@@ -37,6 +37,8 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.saveddata.maps.MapDecorationTypes;
 import net.minecraft.world.level.saveddata.maps.MapItemSavedData;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 import javax.annotation.Nullable;
@@ -58,6 +60,7 @@ public final class RaidManager {
     static final double CANNON_RANGE = 150;
     static final boolean CRANK_BACK_OPENS = false; // turn(back=true) extends the piston = closes the gate (measured in game)
     static final TicketType<ChunkPos> REBUILD_TICKET = TicketType.create("raidsonplayer_rebuild", java.util.Comparator.comparingLong(ChunkPos::toLong), 300);
+    static final TicketType<ChunkPos> RAID_TICKET = TicketType.create("raidsonplayer_raid", java.util.Comparator.comparingLong(ChunkPos::toLong), 100);
 
     private RaidManager() {}
 
@@ -142,6 +145,7 @@ public final class RaidManager {
                 near.home = rp.immutable();
                 near.nextRaid = points(d, near) + raidInterval(server.overworld());
                 near.lastRegen = points(d, near);
+                near.scoutSent = true; // no scout due yet (the morning roll or a planned night calls one)
                 d.bases.put(near.id, near);
                 RaidsOnPlayer.LOG.info("New player base at {} for {}", rp, p.getName().getString());
             }
@@ -180,7 +184,7 @@ public final class RaidManager {
             reinforce(g, d.stage, cap(b, d.stage), 1);
         }
         boolean night = night(level);
-        if (g != null && b.raid == null && b.waves == 0 && !night && pts >= b.nextRaid && canRaid(g) && memberNear(level, b, 128)) {
+        if (g != null && b.raid == null && b.waves == 0 && !night && pts >= b.nextRaid && canRaid(g) && raidable(level, b)) {
             if (scouted(d, b) && level.random.nextDouble() < Config.FULL_DAY_CHANCE.get()) {
                 b.nextRaid = pts + raidInterval(level);
                 startFullRaid(level, d, b, t);
@@ -190,9 +194,13 @@ public final class RaidManager {
         // Tower cannons shell the player base when it is within range, someone is home and the artilleryman is in camp.
         if (!b.cannons.isEmpty() && t >= b.nextCannon && horizontalDist(Vec3.atCenterOf(b.camp), Vec3.atCenterOf(b.home)) <= CANNON_RANGE
                 && g != null && g.roles.contains(Role.ARTILLERYMAN) && memberNear(level, b, 64)) {
-            b.nextCannon = t + 600 + level.random.nextInt(600);
             BlockPos m = b.cannons.get(level.random.nextInt(b.cannons.size()));
-            if (level.isLoaded(m)) Artillery.fireCannon(level, m, groundNear(level, b.home, 8));
+            Vec3 aim = groundNear(level, b.home, 8);
+            if (friendsNear(level, aim, BLAST)) b.nextCannon = t + 100; // raiders at the target: hold fire, look again in 5 s
+            else {
+                b.nextCannon = t + 600 + level.random.nextInt(600);
+                if (level.isLoaded(m)) Artillery.fireCannon(level, m, aim);
+            }
         }
 
         tickFullRaid(level, d, b, t);
@@ -340,6 +348,17 @@ public final class RaidManager {
         }
     }
 
+    /** Someone to raid: a player of the base is home, or raidsWhenAway is on and the base still has players. */
+    static boolean raidable(ServerLevel level, Base b) {
+        return Config.RAIDS_WHEN_AWAY.get() ? !b.members.isEmpty() : memberNear(level, b, 128);
+    }
+
+    /** raidsWhenAway: a day or night raid squad at a base nobody is near keeps the area loaded and raids it anyway. */
+    static boolean raidingAway(Squad s, Base b) {
+        return Config.RAIDS_WHEN_AWAY.get() && (s.kind == Kind.RAID || s.kind == Kind.NIGHT) && s.state != State.RETREAT
+                && horizontalDist(s.pos, Vec3.atBottomCenterOf(dest(s, b))) < 48;
+    }
+
     static boolean memberNear(ServerLevel level, Base b, double r) {
         return b.members.stream().map(level::getPlayerByUUID)
                 .anyMatch(p -> p != null && horizontalDist(p.position(), Vec3.atCenterOf(b.home)) < r);
@@ -414,8 +433,8 @@ public final class RaidManager {
                 b.nextNight = pts + 24000 - dt; // try again next morning, with better odds
             }
         }
+        if (!night && dt < 11000 && !b.scoutSent && b.scout == null && memberNear(level, b, 128)) sendScout(level, d, b, t); // planned night or a lone visit
         if (!b.nightPlanned) return;
-        if (!night && dt < 11000 && !b.scoutSent && memberNear(level, b, 128)) sendScout(level, d, b, t);
         if (night) {
             Squad sc = b.scout == null ? null : d.squads.get(b.scout);
             if (sc != null && sc.sawPlayer) scoutReported(level, d, b, sc); // still out at dusk, but alive: his report is in
@@ -467,16 +486,23 @@ public final class RaidManager {
 
     /** Dusk on a planned night: hit this base with a fresh report, else the last base a scout reported, else nothing. */
     static void launchNight(ServerLevel level, RaidData d, Base b, long t) {
-        b.nightPlanned = false;
         Base target = b;
         if (!b.freshIntel) {
             target = b.members.stream().map(d.lastScouted::get).filter(Objects::nonNull).map(d.bases::get)
                     .filter(x -> x != null && x.camp != null).findFirst().orElse(null);
             if (target == null) {
+                b.nightPlanned = false;
                 tell(level, b, "The raiders don't know where you live. No night raid tonight.", ChatFormatting.GREEN);
                 return;
             }
         }
+        // nobody home: they wait for someone, all night and the nights after, and send another scout each day
+        Vec3 at = Vec3.atCenterOf(target.home); // (an old base has no members of its own: whoever planned this counts)
+        if (!Config.RAIDS_WHEN_AWAY.get() && b.members.stream().map(level::getPlayerByUUID).noneMatch(p -> p != null && horizontalDist(p.position(), at) < 128)) {
+            b.scoutSent = false;
+            return;
+        }
+        b.nightPlanned = false;
         boolean fresh = target == b && b.freshIntel;
         if (target.waves > 0) return; // a full-sized raid is already on there
         if (fresh && level.random.nextDouble() < Config.FULL_NIGHT_CHANCE.get()) { // the scout's report calls for everything they have
@@ -606,9 +632,9 @@ public final class RaidManager {
         }
         if (b.strikes > 0 && t >= b.nextStrike && squads.stream().anyMatch(s -> s.state == State.ATTACK)) {
             if (!artilleryAlive(d, b)) { b.strikes = 0; return; } // no one left to call the guns
+            if (!callStrike(level, d, b)) return; // their own men are in the way: try again in a second
             b.strikes--;
             b.nextStrike = t + (d.stage >= 4 ? 400 + level.random.nextInt(400) : 800 + level.random.nextInt(600));
-            callStrike(level, d, b);
         }
     }
 
@@ -618,41 +644,75 @@ public final class RaidManager {
 
     /**
      * An airstrike is due. An artilleryman out on a raid (preferably one who can see a player) fires a flare and the
-     * shells follow on what he sees; with none in the field, the camp's guns fire blind on the home area.
+     * shells follow on what he sees; with none in the field, the camp's guns fire blind on the home area. False (nothing
+     * fired) while raiders are too close to the target.
      */
-    static void callStrike(ServerLevel level, RaidData d, Base b) {
+    static boolean callStrike(ServerLevel level, RaidData d, Base b) {
         RaiderEntity spotter = null;
         for (Squad s : d.squads.values())
             if (s.base.equals(b.id) && s.kind.assault() && s.state != State.RETREAT)
                 for (UUID u : s.live)
                     if (level.getEntity(u) instanceof RaiderEntity e && e.role() == Role.ARTILLERYMAN && e.isAlive() && e.strikeAt < 0
                             && (spotter == null || spotter.spotted() == null && e.spotted() != null)) spotter = e;
-        if (spotter != null) spotter.signal();
-        else {
-            strike(level, b, d.stage, null);
-            tell(level, b, "The raiders called an airstrike from the " + direction(b.home, b.camp) + "! Take cover!", ChatFormatting.DARK_RED);
+        if (spotter != null) {
+            Player p = spotter.spotted();
+            if (strikeAim(level, b, d.stage, p == null ? null : p.position()) == null) return false;
+            spotter.signal();
+            return true;
         }
+        if (!strike(level, b, d.stage, null)) return false;
+        tell(level, b, "The raiders called an airstrike from the " + direction(b.home, b.camp) + "! Take cover!", ChatFormatting.DARK_RED);
+        return true;
     }
 
-    /** Shells land around `seen` (else a defender near home, else the home) with a fresh random offset each time. Stage 4: more shells, tighter. */
-    static void strike(ServerLevel level, Base b, int stage, @Nullable Vec3 seen) {
+    /**
+     * No raider may be this close to where a shell lands. A CBC HE shell (entity explosive power 12) hurts out to 24
+     * blocks; at 14 one of their own (10% damage to raiders, RaiderEntity.hurt) still takes ~5, a quarter of their health.
+     */
+    static final double BLAST = 14;
+
+    /** A raider within r (horizontally; shells fall from the sky, so ±48 in height) of `at`: the guns hold fire rather than hit their own. */
+    static boolean friendsNear(ServerLevel level, Vec3 at, double r) {
+        return !level.getEntitiesOfClass(RaiderEntity.class, AABB.ofSize(at, r * 2, 96, r * 2),
+                e -> e.isAlive() && horizontalDist(e.position(), at) < r).isEmpty();
+    }
+
+    static double strikeSpread(int stage) { return stage >= 4 ? 4 : 8; }
+
+    /**
+     * Where an airstrike would aim: around `seen` (else a defender near home, else the home) with a fresh random offset,
+     * a few tries for a spot clear of raiders. Null if every try lands too close to them.
+     */
+    @Nullable static Vec3 strikeAim(ServerLevel level, Base b, int stage, @Nullable Vec3 seen) {
         List<ServerPlayer> targets = b.members.stream().map(u -> level.getServer().getPlayerList().getPlayer(u))
                 .filter(p -> p != null && p.level() == level && horizontalDist(p.position(), Vec3.atCenterOf(b.home)) < 64).toList();
-        Vec3 aim = seen != null ? seen : targets.isEmpty() ? groundNear(level, b.home, 6) : targets.get(level.random.nextInt(targets.size())).position();
-        double off = stage >= 4 ? 4 : 10, spread = stage >= 4 ? 4 : 8;
-        aim = aim.add(Mth.nextDouble(level.random, -off, off), 0, Mth.nextDouble(level.random, -off, off));
+        Vec3 at = seen != null ? seen : targets.isEmpty() ? groundNear(level, b.home, 6) : targets.get(level.random.nextInt(targets.size())).position();
+        double off = stage >= 4 ? 4 : 10, clear = strikeSpread(stage) * 1.5 + BLAST; // shells scatter over a square: its corners
+        for (int i = 0; i < 4; i++) {
+            Vec3 aim = at.add(Mth.nextDouble(level.random, -off, off), 0, Mth.nextDouble(level.random, -off, off));
+            if (!friendsNear(level, aim, clear)) return aim;
+        }
+        return null;
+    }
+
+    /** Shells on strikeAim. Stage 4: more shells, tighter. False if raiders are too close to the target to fire. */
+    static boolean strike(ServerLevel level, Base b, int stage, @Nullable Vec3 seen) {
+        Vec3 aim = strikeAim(level, b, stage, seen);
+        if (aim == null) return false;
         int shells = stage >= 4 ? 3 + level.random.nextInt(2) : 2;
-        Artillery.airstrike(level, aim, Vec3.atCenterOf(b.camp).subtract(aim), shells, spread, level.random);
+        Artillery.airstrike(level, aim, Vec3.atCenterOf(b.camp).subtract(aim), shells, strikeSpread(stage), level.random);
+        return true;
     }
 
     // ---------------------------------------------------------------- patrols
 
     static void tickPatrolRoll(ServerLevel level, RaidData d, Base b, long t) {
         long pts = points(d, b);
-        if (b.patrol != null || b.members.isEmpty() || pts < b.nextPatrol || dayTime(level) > 6000) return;
+        if (b.members.isEmpty() || pts < b.nextPatrol || dayTime(level) > 6000) return;
         b.nextPatrol = pts + 24000 - dayTime(level); // next morning
-        if (level.random.nextDouble() >= Config.PATROL_CHANCE.get()) return;
-        startPatrol(level, d, b, t);
+        // a scout looks in today (tickNightPlan sends him once someone is home); planned nights send their own
+        if (!b.nightPlanned && b.scout == null && level.random.nextDouble() < Config.SCOUT_CHANCE.get()) b.scoutSent = false;
+        if (b.patrol == null && level.random.nextDouble() < Config.PATROL_CHANCE.get()) startPatrol(level, d, b, t);
     }
 
     static void startPatrol(ServerLevel level, RaidData d, Base b, long t) {
@@ -690,7 +750,12 @@ public final class RaidManager {
         boolean mat = !s.live.isEmpty();
         if (mat) s.pos = centroid(level, s);
         double range = mat ? 112 : 96; // hysteresis so squads don't flicker at the edge
-        boolean near = !level.getPlayers(p -> !p.isSpectator() && horizontalDist(p.position(), s.pos) < range).isEmpty();
+        boolean away = raidingAway(s, b);
+        if (away) { // nobody around to load the base: the raid does it (5x5 chunks entity-ticking around the squad)
+            ChunkPos c = new ChunkPos(BlockPos.containing(s.pos));
+            level.getChunkSource().addRegionTicket(RAID_TICKET, c, 4, c);
+        }
+        boolean near = away || !level.getPlayers(p -> !p.isSpectator() && horizontalDist(p.position(), s.pos) < range).isEmpty();
         if (!near) {
             if (mat) dematerialize(s, level);
             mat = false;
@@ -746,13 +811,12 @@ public final class RaidManager {
                             b.nextStrike = t + 300 + level.random.nextInt(300); // first shells soon after they reach the walls
                             tell(level, b, "The night raiders have reached your base!", ChatFormatting.RED);
                         } else if (!nightRaid) tell(level, b, "The raiders have reached your base!", ChatFormatting.RED);
-                    } else enter(s, State.RETREAT, t); // nobody home: nothing to raid
+                    } else if (!raidingAway(s, b) || level.getDifficulty() == Difficulty.PEACEFUL) enter(s, State.RETREAT, t); // nobody home: nothing to raid (raidsWhenAway: wait for the area to load)
                 }
             }
             case ATTACK -> {
                 if (s.kind != Kind.NIGHT && d.stage >= 3 && !s.airstrike && mat && t - s.stateSince > 300 && artilleryAlive(d, b) && scouted(d, b)) {
-                    s.airstrike = true;
-                    callStrike(level, d, b);
+                    s.airstrike = callStrike(level, d, b); // not while they would hit their own: retried every second
                 }
                 if (losing(level, s)) {
                     enter(s, State.RETREAT, t);

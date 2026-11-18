@@ -351,10 +351,13 @@ public class RaiderEntity extends Pillager {
         RaidsOnPlayer.LOG.debug("Leader at {} has {} boats for {} raiders", blockPosition(), boats.size(), crew.size());
     }
 
-    /** Vanilla boats grab any mob that bumps them: a raider only gets into the one his leader gave him. */
+    /**
+     * Vanilla boats grab any mob that bumps them: a raider only gets into the one his leader gave him. Server only: the
+     * client seats passengers through this too, and it doesn't know `boat` (it would show empty boats and frozen raiders).
+     */
     @Override
     public boolean startRiding(Entity vehicle, boolean force) {
-        return (!(vehicle instanceof Boat) || vehicle == boat) && super.startRiding(vehicle, force);
+        return (level().isClientSide || !(vehicle instanceof Boat) || vehicle == boat) && super.startRiding(vehicle, force);
     }
 
     /** In a boat: the first one in rows toward where the squad is going; everyone gets out at the far shore. */
@@ -402,7 +405,8 @@ public class RaiderEntity extends Pillager {
         Squad s = squad();
         Base b = s == null ? null : base(s);
         Player p = spotted();
-        if (b != null) RaidManager.strike((ServerLevel) level(), b, RaidData.get(((ServerLevel) level()).getServer()).stage, p == null ? null : p.position());
+        if (b != null && !RaidManager.strike((ServerLevel) level(), b, RaidData.get(((ServerLevel) level()).getServer()).stage, p == null ? null : p.position()))
+            RaidManager.tell((ServerLevel) level(), b, "The artilleryman held his fire: his own men were too close to the target.", ChatFormatting.GOLD);
     }
 
     /** Puts the right item in hand: a tool while digging, the bow at range or out of reach, TNT or the spyglass when not fighting. */

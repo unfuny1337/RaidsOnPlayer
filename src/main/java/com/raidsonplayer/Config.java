@@ -47,6 +47,14 @@ public final class Config {
     public static final ModConfigSpec.DoubleValue PATROL_CHANCE = B
             .comment("Chance each in-game day that a raider patrol wanders near a base")
             .defineInRange("patrolChance", 0.3, 0.0, 1.0);
+    public static final ModConfigSpec.DoubleValue SCOUT_CHANCE = B
+            .comment("Chance each morning that a scout comes to spy on a base even with no night raid planned (planned nights always send one)."
+                    + " A scout that gets away marks the base: full-sized raids, airstrikes and night raids need that")
+            .defineInRange("scoutChance", 0.4, 0.0, 1.0);
+    public static final ModConfigSpec.BooleanValue RAIDS_WHEN_AWAY = B
+            .comment("Raid bases when none of their players is home (within 128 blocks), even while they are offline: the raiders load the area,"
+                    + " break in and loot. false = day and night raids wait until someone is home. Full-sized raids always need a defender")
+            .define("raidsWhenAway", false);
     public static final ModConfigSpec.DoubleValue DEMO_CHANCE_2 = B
             .comment("Chance that a free night raid slot is a demoman instead of a raider, stage 2")
             .defineInRange("demomanChanceStage2", 0.15, 0.0, 1.0);

@@ -288,13 +288,14 @@ public final class RaidManager {
 
     static void placeCamp(ServerLevel level, RaidData d, Base b, long t) {
         int min = Config.CAMP_MIN_DIST.get(), max = Math.max(min, Config.CAMP_MAX_DIST.get());
+        Map<String, Integer> why = new TreeMap<>();
         for (int i = 0; i < 12; i++) {
             double a = level.random.nextDouble() * Math.PI * 2, r = Mth.nextDouble(level.random, min, max);
             int x = b.home.getX() + (int) (Math.cos(a) * r), z = b.home.getZ() + (int) (Math.sin(a) * r);
             // not near another player's home (its own home is skipped: rounding puts a site at exactly `min` just inside it)
-            if (d.bases.values().stream().anyMatch(o -> o != b && !o.home.equals(b.home) && o.home.distToCenterSqr(x, o.home.getY(), z) < (double) min * min)) continue;
-            if (d.bases.values().stream().anyMatch(o -> o.camp != null && o.camp.distToCenterSqr(x, o.camp.getY(), z) < CAMP_SPACING * CAMP_SPACING)) continue;
-            BlockPos c = CampBuilder.trySite(level, x, z);
+            if (d.bases.values().stream().anyMatch(o -> o != b && !o.home.equals(b.home) && o.home.distToCenterSqr(x, o.home.getY(), z) < (double) min * min)) { why.merge("near a home", 1, Integer::sum); continue; }
+            if (d.bases.values().stream().anyMatch(o -> o.camp != null && o.camp.distToCenterSqr(x, o.camp.getY(), z) < CAMP_SPACING * CAMP_SPACING)) { why.merge("near a camp", 1, Integer::sum); continue; }
+            BlockPos c = CampBuilder.trySite(level, x, z, Math.min(b.placeFails, 4), why); // rough land: a bit less picky each time
             if (c == null) continue;
             b.camp = c;
             apply(b, CampBuilder.build(level, c, d.stage, 0, facing(c, b.home), b.parent != null, level.random), d.stage);
@@ -307,7 +308,10 @@ public final class RaidManager {
                     + camps(d, d.bases.getOrDefault(b.parent, b)) + " camps now)", ChatFormatting.DARK_RED);
             return;
         }
-        b.nextPlaceTry = t + 600; // all candidates were water or cliffs: try again in 30 s
+        int wait = b.placeFails < 4 ? 200 : 600; // all candidates were water or cliffs: soon again, a bit less picky
+        b.nextPlaceTry = t + wait;
+        b.placeFails++;
+        RaidsOnPlayer.LOG.info("No raider camp site found for base {} yet {}; trying again in {} s", b.home, why, wait / 20);
     }
 
     static Squad newSquad(Base b, Kind kind, State state, Vec3 pos, List<Role> roles, long t) {

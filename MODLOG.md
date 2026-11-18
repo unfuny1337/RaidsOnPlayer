@@ -346,5 +346,30 @@ Verified in game (screenshots): the jungle camp at 1880,70,-1842 (built on a pli
 eased hill; first try left a dirt cliff where the slope met a lake (water columns were skipped), fixed by banking into
 water. Two new expansion camps (1809,72,-1899 and 1819,67,-1773) sit on gentle mounds in a jungle and a birch forest.
 
+## Leaders take their boats back; goal timing bug (2026-11-18)
+Request: "make leader take the boats after the water was crossed". The leader keeps the boats he put in (`fleet`;
+boats that were already floating there are reused but not taken). `PackBoatsGoal` (priority 0, MOVE): once a boat of
+his is empty and no squad mate still has it as theirs, and nobody is within 12 to fight, he walks to it (within 16
+blocks) and takes it (discarded, pickup sound); one he can't reach in 10 s is left.
+Bug found on the way (gotcha 28): `Mob.serverAiStep` checks goals (`canUse`) and ticks running goals only when
+`tickCount + getId()` is even, so `tickCount % n == 0` in goal code never matched for odd-id raiders. That had silently
+disabled stealing (StealGoal), the "wall ahead" breach check and the demoman's run-from-bomb for half the raiders.
+`RaiderEntity.every(n)` = `(tickCount + getId()) % n == 0` replaces them all (entity `tick()` code is fine as it was).
+Test site: the old channel near -289,2221 is cratered by earlier shelling, so a fresh one: a home on the west bank of a
+river at 3019,70,3060; `/rop expand` until a camp's path crossed water (camp 2891,123,3277, two water stretches).
+Verified: before the fix 6 + 5 boats stayed behind; after it, 4 boats taken back within 15 s of the first crossing and
+4-5 after the second, the squad moved on with none left.
+
+## First camp took minutes on rough land (2026-11-18)
+User: "placed and clicked on bed, slept through few nights, increased tickrate, no camp spawned". Their debug.log
+showed the base at 52,66,380 (17:03:43) and the camp at 115,67,324 only at 17:07:48: every 30 s all 12 candidate sites
+were rejected. Reproduced on the dev server with their seed (read from their level.dat, read-only) in throwaway worlds
+`run/seedtest`, `run/seedtest2` and their distances (75-150): the ring around their home is ocean, river, ponds and
+mountain foothills. New log line per failed attempt with the reasons, e.g. `{ocean/river=5, steep 22=1, water=7}`.
+Fix: `trySite` measures ground under trees (`groundSurface`); up to 3 outer samples may be water (the 3x3 middle must
+be dry); and each failed attempt adds slack (`Base.placeFails`, not saved): rise allowed 8 + 4*slack, water 3 + slack,
+slack up to 4. Retries every 10 s for the first 4 failures, then 30 s. On their terrain the camp now comes on the 4th
+attempt (~1.5 min with 30 s retries; ~40 s with 10 s).
+
 ## Next step
 Install into the user's instance (ask first; the instance is missing ritchiesprojectilelib). Push the branch when asked. Next ideas: sleep-blocking check with a real player, tunnelling under obsidian, a clean flank test on untouched ground.

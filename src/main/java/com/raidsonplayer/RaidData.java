@@ -49,6 +49,8 @@ public class RaidData extends SavedData {
         public final List<BlockPos> cannons = new ArrayList<>();
         @Nullable public BlockPos gate, gateCrank;
         public long nextRaid, lastSeen, lastRegen, nextPlaceTry, nextCannon;
+        /** Camp placement attempts that found no site (not saved): each one makes the site rules a little less strict. */
+        public int placeFails;
         @Nullable public UUID garrison, raid;
         // night raids
         public long nextNight, nextStrike, nextPatrol;

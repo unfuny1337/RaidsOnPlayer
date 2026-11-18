@@ -100,6 +100,7 @@ public class RaiderEntity extends Pillager {
     @Nullable Vec3 flankDir;      // which way the target is running
     @Nullable Boat boat;          // the boat the leader put in for this raider
     int boatUntil, boatsAt, landing; // board by; leader: next launch; ticks the boat has been grounded
+    final List<Boat> fleet = new ArrayList<>(); // leader: boats he put in, taken back once the crossing is done
     int strikeAt = -1;            // artilleryman: his flare's shells land at this tick
 
     public RaiderEntity(EntityType<? extends Pillager> type, Level level) {
@@ -127,6 +128,7 @@ public class RaiderEntity extends Pillager {
         goalSelector.addGoal(0, new FloatGoal(this));
         goalSelector.addGoal(0, new FleeBombGoal());
         goalSelector.addGoal(0, new BoardGoal()); // beats the retreat march too
+        goalSelector.addGoal(0, new PackBoatsGoal());
         goalSelector.addGoal(1, new AvoidEntityGoal<>(this, Player.class, 16, 1.0, 1.35) {
             @Override public boolean canUse() { return role() == Role.SCOUT && super.canUse(); } // scouts run, they don't fight
         });
@@ -168,6 +170,12 @@ public class RaiderEntity extends Pillager {
 
     boolean holdingRanged() { return isHolding(s -> s.getItem() instanceof CrossbowItem || s.getItem() instanceof BowItem); }
     boolean fights() { return !retreating() && role() != Role.SCOUT; }
+
+    /**
+     * Every n ticks, for goal code. Goals are only checked (canUse) and ticked on every other tick, odd or even by entity id
+     * (Mob.serverAiStep), so a plain tickCount % n == 0 never matches for half the raiders.
+     */
+    boolean every(int n) { return (tickCount + getId()) % n == 0; }
 
     @Nullable Squad squad() {
         return squadId == null || !(level() instanceof ServerLevel sl) ? null : RaidData.get(sl.getServer()).squads.get(squadId);
@@ -340,6 +348,7 @@ public class RaiderEntity extends Pillager {
                 boat.setYRot((float) (Mth.atan2(fwd.z, fwd.x) * Mth.RAD_TO_DEG) - 90f);
                 level().addFreshEntity(boat);
                 boats.add(boat);
+                fleet.add(boat); // only his own: boats that were already floating here stay where they are
             }
         if (boats.isEmpty()) return;
         boatsAt = tickCount + 600;
@@ -799,7 +808,7 @@ public class RaiderEntity extends Pillager {
         public boolean canUse() {
             if (role() != Role.DEMOMAN || tnt <= 0 || !onTheJob() || !canGrief()) return false;
             boolean stuckHere = stuck && scannedAt == stuckAt;
-            if (!stuckHere && !(tickCount % 40 == 0 && knowsLayout() && wallAhead())) return false;
+            if (!stuckHere && !(every(40) && knowsLayout() && wallAhead())) return false;
             if (stuckHere) stuck = false;
             return true;
         }
@@ -871,7 +880,7 @@ public class RaiderEntity extends Pillager {
 
         @Override
         public void tick() {
-            if (tickCount % 20 == 0 && getNavigation().isDone() && distanceToSqr(bombAt) < 10 * 10) BreachGoal.runFrom(RaiderEntity.this, bombAt);
+            if (every(20) && getNavigation().isDone() && distanceToSqr(bombAt) < 10 * 10) BreachGoal.runFrom(RaiderEntity.this, bombAt);
         }
     }
 
@@ -912,7 +921,7 @@ public class RaiderEntity extends Pillager {
             Vec3 post = post();
             if (post == null) return;
             boolean there = distanceToSqr(post) < 3 * 3;
-            if (!there && (tickCount % 40 == 0 || getNavigation().isDone())) getNavigation().moveTo(post.x, post.y, post.z, 1.0);
+            if (!there && (every(40) || getNavigation().isDone())) getNavigation().moveTo(post.x, post.y, post.z, 1.0);
             if (there) getNavigation().stop();
             watching = there;
             getLookControl().setLookAt(lookAt);
@@ -933,7 +942,7 @@ public class RaiderEntity extends Pillager {
 
         @Override
         public void tick() {
-            if (tickCount % 10 != 0 && !getNavigation().isDone()) return;
+            if (!every(10) && !getNavigation().isDone()) return;
             LivingEntity t = getTarget();
             double d = distanceTo(t);
             Vec3 p = t.position().add(flankDir.scale(Math.min(10, d * 0.6))).add(new Vec3(-flankDir.z, 0, flankDir.x).scale(flankSide * Math.min(7, d * 0.5)));
@@ -955,7 +964,56 @@ public class RaiderEntity extends Pillager {
         @Override
         public void tick() {
             if (distanceToSqr(boat) < 2.5 * 2.5) startRiding(boat);
-            else if (tickCount % 10 == 0 || getNavigation().isDone()) getNavigation().moveTo(boat, 1.1);
+            else if (every(10) || getNavigation().isDone()) getNavigation().moveTo(boat, 1.1);
+        }
+    }
+
+    /**
+     * Leader, after a crossing: walks to each boat he put in that is empty and that no one is still to board, and takes it
+     * (it is gone). Only boats within 16 blocks, and not while someone is close enough to fight; one he can't reach in
+     * 10 s is left behind.
+     */
+    class PackBoatsGoal extends Goal {
+        @Nullable private Boat next;
+        private int until;
+
+        PackBoatsGoal() { setFlags(EnumSet.of(Flag.MOVE)); }
+
+        private boolean idle() { return getTarget() == null || distanceToSqr(getTarget()) > 12 * 12; }
+
+        private boolean done(Boat b) { // crossed: empty, and none of the squad still has it as theirs
+            return b.isAlive() && b.getPassengers().isEmpty()
+                    && level().getEntitiesOfClass(RaiderEntity.class, b.getBoundingBox().inflate(32), m -> m.boat == b).isEmpty();
+        }
+
+        @Override
+        public boolean canUse() {
+            if (fleet.isEmpty() || !every(10)) return false;
+            fleet.removeIf(b -> !b.isAlive());
+            if (isPassenger() || !idle()) return false;
+            next = fleet.stream().filter(b -> distanceToSqr(b) < 16 * 16 && done(b)).min(Comparator.comparingDouble(RaiderEntity.this::distanceToSqr)).orElse(null);
+            until = tickCount + 200;
+            return next != null;
+        }
+
+        @Override
+        public boolean canContinueToUse() { return next != null && done(next) && idle() && !isPassenger() && tickCount < until; }
+
+        @Override
+        public void stop() {
+            if (next != null && tickCount >= until) fleet.remove(next); // out of reach: left behind
+            next = null;
+        }
+
+        @Override
+        public void tick() {
+            if (distanceToSqr(next) < 2.5 * 2.5) {
+                swing(InteractionHand.MAIN_HAND);
+                level().playSound(null, next.blockPosition(), SoundEvents.ITEM_PICKUP, SoundSource.HOSTILE, 1f, 0.8f);
+                fleet.remove(next);
+                next.discard();
+                next = null;
+            } else if (every(10) || getNavigation().isDone()) getNavigation().moveTo(next, 1.1);
         }
     }
 
@@ -969,7 +1027,7 @@ public class RaiderEntity extends Pillager {
 
         @Override
         public boolean canUse() {
-            if (tickCount % 20 != 0 || getTarget() != null || full() || role() == Role.SCOUT || role() == Role.DEMOMAN && tnt > 0) return false;
+            if (!every(20) || getTarget() != null || full() || role() == Role.SCOUT || role() == Role.DEMOMAN && tnt > 0) return false;
             squad = squad();
             if (squad == null || squad.state != State.ATTACK || squad.kind == Kind.SCOUT) return false;
             Base b = base(squad);

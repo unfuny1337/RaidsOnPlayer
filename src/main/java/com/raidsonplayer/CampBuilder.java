@@ -42,28 +42,43 @@ public final class CampBuilder {
 
     private CampBuilder() {}
 
+    /** Like surface(), but below tree trunks and leaves: the first free block above the ground itself. */
+    static int groundSurface(ServerLevel level, int x, int z) {
+        BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos(x, surface(level, x, z) - 1, z);
+        while (p.getY() > level.getMinBuildHeight() && (level.getBlockState(p).is(BlockTags.LOGS) || level.getBlockState(p).is(BlockTags.LEAVES))) p.move(Direction.DOWN);
+        return p.getY() + 1;
+    }
+
     /** Surface y (first free block) at x,z, loading/generating the chunk if needed. */
     static int surface(ServerLevel level, int x, int z) {
         return level.getChunk(x >> 4, z >> 4).getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x & 15, z & 15) + 1;
     }
 
     /**
-     * Returns a base origin near x,z if the spot is dry and flat enough for an outpost, else null. The floor goes at the
-     * median ground height around it, so the levelling cuts and fills about equally. Generates chunks synchronously.
+     * Returns a base origin near x,z if the spot is dry and flat enough for an outpost, else null (counting the reason in
+     * `why`). Ground is measured under trees. Flat means 8 blocks of rise across it, plus 4 per `slack`; up to 3 + slack
+     * of the outer samples may be water (the middle must be dry). The floor goes at the median ground height, so the
+     * levelling cuts and fills about equally. Generates chunks synchronously.
      */
     @Nullable
-    static BlockPos trySite(ServerLevel level, int x, int z) {
+    static BlockPos trySite(ServerLevel level, int x, int z, int slack, Map<String, Integer> why) {
         BlockPos at = new BlockPos(x, surface(level, x, z), z);
-        if (level.getBiome(at).is(BiomeTags.IS_OCEAN) || level.getBiome(at).is(BiomeTags.IS_RIVER)) return null;
+        if (level.getBiome(at).is(BiomeTags.IS_OCEAN) || level.getBiome(at).is(BiomeTags.IS_RIVER)) { why.merge("ocean/river", 1, Integer::sum); return null; }
         List<Integer> hs = new ArrayList<>();
+        int wet = 0;
         for (int dx = -16; dx <= 16; dx += 8)
             for (int dz = -16; dz <= 16; dz += 8) {
-                int h = surface(level, x + dx, z + dz);
-                if (!level.getFluidState(new BlockPos(x + dx, h - 1, z + dz)).isEmpty()) return null;
+                int h = groundSurface(level, x + dx, z + dz);
+                if (!level.getFluidState(new BlockPos(x + dx, h - 1, z + dz)).isEmpty()) {
+                    // the middle must be dry; a pond or shore at the edge is fine (the slope banks into it)
+                    if (Math.abs(dx) <= 8 && Math.abs(dz) <= 8 || ++wet > 3 + slack) { why.merge("water", 1, Integer::sum); return null; }
+                    continue;
+                }
                 hs.add(h);
             }
         hs.sort(null);
-        return hs.get(hs.size() - 1) - hs.get(0) <= 8 ? new BlockPos(x, hs.get(hs.size() / 2), z) : null;
+        if (hs.get(hs.size() - 1) - hs.get(0) > 8 + 4 * slack) { why.merge("steep " + (hs.get(hs.size() - 1) - hs.get(0)), 1, Integer::sum); return null; }
+        return new BlockPos(x, hs.get(hs.size() / 2), z);
     }
 
     /** Builds the base for a stage, gate facing `front`, and fills its chests. Clears the footprint first (also used for rebuilds). */

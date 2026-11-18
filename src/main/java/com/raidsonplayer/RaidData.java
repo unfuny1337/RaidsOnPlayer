@@ -31,6 +31,9 @@ public class RaidData extends SavedData {
     }
 
     public int stage = 1;
+    /** Day-scale timers (day raids, expansion, regrowth, night rolls, patrols) run on this: game time plus time skipped by sleeping. */
+    public long clock;
+    long lastTick, lastDay; // not saved: what the clock last saw
     public final Map<UUID, Base> bases = new LinkedHashMap<>();
     public final Map<UUID, Squad> squads = new LinkedHashMap<>();
     /** Player -> the base a scout last saw them at. A night raid whose scout was killed goes there. */
@@ -92,6 +95,7 @@ public class RaidData extends SavedData {
     @Override
     public CompoundTag save(CompoundTag tag, HolderLookup.Provider reg) {
         tag.putInt("stage", stage);
+        tag.putLong("clock", clock);
         ListTag bl = new ListTag();
         for (Base b : bases.values()) {
             CompoundTag t = new CompoundTag();
@@ -175,6 +179,7 @@ public class RaidData extends SavedData {
     static RaidData load(CompoundTag tag, HolderLookup.Provider reg) {
         RaidData d = new RaidData();
         d.stage = Math.max(1, tag.getInt("stage"));
+        d.clock = tag.getLong("clock");
         for (Tag e : tag.getList("bases", Tag.TAG_COMPOUND)) {
             CompoundTag t = (CompoundTag) e;
             Base b = new Base();

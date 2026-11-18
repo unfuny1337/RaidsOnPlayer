@@ -178,11 +178,11 @@ public class RaidsOnPlayer {
     static int info(CommandSourceStack src) {
         RaidData d = data(src);
         ServerLevel level = src.getServer().overworld();
-        StringBuilder sb = new StringBuilder("Stage " + d.stage + ", " + d.bases.size() + " base(s)");
+        StringBuilder sb = new StringBuilder("Stage " + d.stage + ", raider day " + d.clock / 24000 + ", " + d.bases.size() + " base(s)");
         for (Base b : d.bases.values()) {
             sb.append(b.parent != null ? "\n  + expansion camp of home " : "\n- home ").append(b.home.toShortString()).append(" members ").append(b.members.size())
                     .append(" camp ").append(b.camp == null ? "none" : b.camp.toShortString() + " (stage " + b.campStage + ")")
-                    .append(" next raid in ").append(Math.max(0, b.nextRaid - level.getGameTime()) / 1200).append(" min")
+                    .append(" next raid in ").append(Math.max(0, b.nextRaid - d.clock) / 1200).append(" min")
                     .append(b.nightPlanned ? ", night raid planned" : "").append(b.freshIntel ? ", scouted" : "")
                     .append(b.waves > 0 ? ", full raid wave " + b.wave + "/" + b.waves : "");
             for (Squad s : d.squads.values())

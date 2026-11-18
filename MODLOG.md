@@ -259,5 +259,13 @@ new camp to the north of your base! (2 camps now)"; `/tick sprint 2d` (real tick
 133 blocks south-west, "(3 camps now)", and a day raid set out during the sprint.
 Gotcha 27: `/time add` changes the day time only; timers on game time need `/tick sprint`.
 
+## Sleeping counts as a day (2026-11-18)
+Day-scale timers (day raids, expansion, garrison regrowth, the weekly night roll, patrols) moved from game time to
+`RaidData.clock`: every second it adds the ticks that passed plus however far the day time jumped beyond them (sleeping,
+/time add). Setting the time back is ignored; with doDaylightCycle off it still runs at tick speed. It starts at game time, so
+older saves keep their timers. Short timers (waves, strikes, cannons, 30 s retries, scouts) stay on game time.
+`/rop info` shows the raider day. Verified over RCON: /time add 12000 moved the next day raid 57 -> 47 min; /time set 1000
+afterwards left it at 47; with the daylight cycle off it went 47 -> 46 in 62 s.
+
 ## Next step
 Install into the user's instance (ask first; the instance is missing ritchiesprojectilelib). Push the branch when asked. Next ideas: sleep-blocking check with a real player, tunnelling under obsidian, a clean flank test on untouched ground.

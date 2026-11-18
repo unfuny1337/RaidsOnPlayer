@@ -52,6 +52,7 @@ public final class RaidManager {
             {ResourceLocation.parse("create:brass")},
     };
     static final int[] GARRISON_CAP = Composition.GARRISON_CAP;
+    static final int CAMP_SPACING = 64; // blocks between raider camps
     static final int BASE_RADIUS = 64, SEEN_UNSEEN_TICKS = 3600, ATTACK_TIMEOUT = 4800;
     static final double MARCH_SPEED = 2.5; // blocks per second while virtual
     static final double CANNON_RANGE = 150;
@@ -109,11 +110,11 @@ public final class RaidManager {
         for (ServerPlayer p : server.getPlayerList().getPlayers()) {
             BlockPos rp = p.getRespawnPosition();
             boolean valid = rp != null && p.getRespawnDimension() == Level.OVERWORLD;
-            Base cur = d.bases.values().stream().filter(b -> b.members.contains(p.getUUID())).findFirst().orElse(null);
+            Base cur = baseOf(d, p);
             if (cur != null && valid && cur.home.closerThan(rp, BASE_RADIUS)) continue;
             if (cur != null) cur.members.remove(p.getUUID());
             if (!valid) continue;
-            Base near = d.bases.values().stream().filter(b -> b.home.closerThan(rp, BASE_RADIUS)).findFirst().orElse(null);
+            Base near = d.bases.values().stream().filter(b -> b.parent == null && b.home.closerThan(rp, BASE_RADIUS)).findFirst().orElse(null);
             if (near == null) {
                 near = new Base();
                 near.home = rp.immutable();
@@ -124,6 +125,12 @@ public final class RaidManager {
             }
             near.members.add(p.getUUID());
         }
+        for (Base x : d.bases.values()) // expansion camps raid whoever lives at the base they were built around
+            if (x.parent != null) {
+                x.members.clear();
+                Base p = d.bases.get(x.parent);
+                if (p != null) x.members.addAll(p.members);
+            }
     }
 
     static long raidInterval(ServerLevel level) {
@@ -162,10 +169,39 @@ public final class RaidManager {
             if (level.isLoaded(m)) Artillery.fireCannon(level, m, groundNear(level, b.home, 8));
         }
 
+        tickFullRaid(level, d, b, t);
+        if (b.parent != null) return; // expansion camps: garrison, day raids and cannons only
         tickNightPlan(level, d, b, t, night);
         tickNightRaid(level, d, b, t, night);
-        tickFullRaid(level, d, b, t);
         tickPatrolRoll(level, d, b, t);
+        tickExpansion(level, d, b, t);
+    }
+
+    // ---------------------------------------------------------------- expansion
+
+    /** Every expansionDays the raiders put up another camp around a lived-in base, up to maxCampsPerBase (first one included). */
+    static void tickExpansion(ServerLevel level, RaidData d, Base b, long t) {
+        int days = Config.EXPAND_DAYS.get();
+        if (days <= 0 || b.members.isEmpty()) return;
+        if (b.nextExpand == 0) b.nextExpand = t + days * 24000L;
+        if (t < b.nextExpand) return;
+        b.nextExpand = t + days * 24000L;
+        if (camps(d, b) < Config.MAX_CAMPS.get()) expand(level, d, b, t);
+    }
+
+    /** A new camp around `b`'s home; it is built on the next base tick (placeCamp, retried until a site is found). */
+    static void expand(ServerLevel level, RaidData d, Base b, long t) {
+        Base x = new Base();
+        x.parent = b.id;
+        x.home = b.home;
+        x.members.addAll(b.members);
+        x.nextRaid = t + raidInterval(level);
+        x.lastRegen = t;
+        d.bases.put(x.id, x);
+    }
+
+    static int camps(RaidData d, Base b) {
+        return 1 + (int) d.bases.values().stream().filter(x -> b.id.equals(x.parent)).count();
     }
 
     /** A random surface point within `spread` blocks of `p` (the chunk must be loaded). */
@@ -221,7 +257,8 @@ public final class RaidManager {
             double a = level.random.nextDouble() * Math.PI * 2, r = Mth.nextDouble(level.random, min, max);
             int x = b.home.getX() + (int) (Math.cos(a) * r), z = b.home.getZ() + (int) (Math.sin(a) * r);
             // not near another player's home (its own home is skipped: rounding puts a site at exactly `min` just inside it)
-            if (d.bases.values().stream().anyMatch(o -> o != b && o.home.distToCenterSqr(x, o.home.getY(), z) < (double) min * min)) continue;
+            if (d.bases.values().stream().anyMatch(o -> o != b && !o.home.equals(b.home) && o.home.distToCenterSqr(x, o.home.getY(), z) < (double) min * min)) continue;
+            if (d.bases.values().stream().anyMatch(o -> o.camp != null && o.camp.distToCenterSqr(x, o.camp.getY(), z) < CAMP_SPACING * CAMP_SPACING)) continue;
             BlockPos c = CampBuilder.trySite(level, x, z);
             if (c == null) continue;
             b.camp = c;
@@ -231,6 +268,8 @@ public final class RaidManager {
             d.squads.put(g.id, g);
             b.garrison = g.id;
             RaidsOnPlayer.LOG.info("Raider camp (stage {}) built at {} for base {}", d.stage, c, b.home);
+            if (b.parent != null) tell(level, b, "The raiders built a new camp to the " + direction(b.home, c) + " of your base! ("
+                    + camps(d, d.bases.getOrDefault(b.parent, b)) + " camps now)", ChatFormatting.DARK_RED);
             return;
         }
         b.nextPlaceTry = t + 600; // all candidates were water or cliffs: try again in 30 s
@@ -692,7 +731,7 @@ public final class RaidManager {
     static boolean knowsLayout(Squad s, Base b) { return s.kind == Kind.FULL || s.kind == Kind.NIGHT && b.freshIntel; }
 
     /** Has a scout ever reported this base? (Day raid airstrikes need to know where to aim.) */
-    static boolean scouted(RaidData d, Base b) { return d.lastScouted.containsValue(b.id); }
+    static boolean scouted(RaidData d, Base b) { return d.lastScouted.containsValue(b.parent != null ? b.parent : b.id); }
 
     static void tickScout(ServerLevel level, RaidData d, Squad s, Base b, boolean mat, long t) {
         Vec3 home = Vec3.atCenterOf(b.home);
@@ -921,6 +960,6 @@ public final class RaidManager {
     }
 
     @Nullable static Base baseOf(RaidData d, ServerPlayer p) {
-        return d.bases.values().stream().filter(b -> b.members.contains(p.getUUID())).findFirst().orElse(null);
+        return d.bases.values().stream().filter(b -> b.parent == null && b.members.contains(p.getUUID())).findFirst().orElse(null);
     }
 }

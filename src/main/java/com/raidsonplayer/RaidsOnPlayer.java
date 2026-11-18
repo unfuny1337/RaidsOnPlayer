@@ -83,7 +83,7 @@ public class RaidsOnPlayer {
         });
     }
 
-    /** /rop info | stage | raid | rebuild | fire | gate | airstrike | night [launch] | full | scout | patrol  (ops only; for admins and testing) */
+    /** /rop info | stage | raid | rebuild | fire | gate | airstrike | night [launch] | full | expand | scout | patrol  (ops only; for admins and testing) */
     static void commands(RegisterCommandsEvent e) {
         e.getDispatcher().register(Commands.literal("rop").requires(s -> s.hasPermission(2))
                 .then(Commands.literal("info").executes(c -> info(c.getSource())))
@@ -139,6 +139,11 @@ public class RaidsOnPlayer {
                     RaidManager.startFullRaid(level, d, b, level.getGameTime());
                     return "Full-sized raid started.";
                 })))
+                .then(Commands.literal("expand").executes(c -> withBase(c.getSource(), (level, d, b) -> { // another camp now, skipping the timer
+                    if (RaidManager.camps(d, b) >= Config.MAX_CAMPS.get()) return "Already at maxCampsPerBase (" + Config.MAX_CAMPS.get() + ").";
+                    RaidManager.expand(level, d, b, level.getGameTime());
+                    return "The raiders will build another camp around your base.";
+                })))
                 .then(Commands.literal("scout").executes(c -> withBase(c.getSource(), (level, d, b) -> {
                     RaidManager.planNight(b);
                     RaidManager.sendScout(level, d, b, level.getGameTime());
@@ -175,7 +180,7 @@ public class RaidsOnPlayer {
         ServerLevel level = src.getServer().overworld();
         StringBuilder sb = new StringBuilder("Stage " + d.stage + ", " + d.bases.size() + " base(s)");
         for (Base b : d.bases.values()) {
-            sb.append("\n- home ").append(b.home.toShortString()).append(" members ").append(b.members.size())
+            sb.append(b.parent != null ? "\n  + expansion camp of home " : "\n- home ").append(b.home.toShortString()).append(" members ").append(b.members.size())
                     .append(" camp ").append(b.camp == null ? "none" : b.camp.toShortString() + " (stage " + b.campStage + ")")
                     .append(" next raid in ").append(Math.max(0, b.nextRaid - level.getGameTime()) / 1200).append(" min")
                     .append(b.nightPlanned ? ", night raid planned" : "").append(b.freshIntel ? ", scouted" : "")

@@ -245,5 +245,19 @@ during the break gave "Nobody was home: the raiders called off the full-sized ra
 (it waited until the camp had 2+ raiders, as day raids do).
 Not verified: stages 2-4 wave sizes in game (unit tested only), the 5-minute overdue wave, sleeping blocked during a full raid.
 
+## Camp expansion (2026-11-18)
+Request: every 2 days, guaranteed, the raiders build a new base near your current base.
+Built: an expansion camp is a `Base` with `parent` = the base it was built around: same home, players mirrored from the parent
+in `updateMembership` (players themselves only ever join main bases; `baseOf` skips expansions). Main bases with players run
+`tickExpansion`: every `expansionDays` (2) another camp, up to `maxCampsPerBase` (8, first included). The new camp is placed by
+the usual `placeCamp` (baseDistanceMin-Max from home, dry and flat, retried every 30 s) at least 64 blocks from every other camp,
+built for the current stage with a full garrison, announced in chat. Expansion camps have their own garrison, day raids
+(full raid chance included), tower cannons and stage rebuilds; night raids, scouts and patrols stay with the first camp. A scout
+report on the home counts for its expansion camps. `/rop expand` adds one now; `/rop info` lists them under their home.
+Verified in game: `/rop expand` built a stage 3 camp 195 blocks north of home with an 8-raider garrison and "The raiders built a
+new camp to the north of your base! (2 camps now)"; `/tick sprint 2d` (real ticks, so game time advances) gave the timed one,
+133 blocks south-west, "(3 camps now)", and a day raid set out during the sprint.
+Gotcha 27: `/time add` changes the day time only; timers on game time need `/tick sprint`.
+
 ## Next step
 Install into the user's instance (ask first; the instance is missing ritchiesprojectilelib). Push the branch when asked. Next ideas: sleep-blocking check with a real player, tunnelling under obsidian, a clean flank test on untouched ground.

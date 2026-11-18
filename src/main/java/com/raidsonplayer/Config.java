@@ -50,6 +50,12 @@ public final class Config {
     public static final ModConfigSpec.DoubleValue DEMO_CHANCE_4 = B
             .comment("Same, stage 4")
             .defineInRange("demomanChanceStage4", 0.35, 0.0, 1.0);
+    public static final ModConfigSpec.IntValue EXPAND_DAYS = B
+            .comment("Every this many in-game days the raiders build another camp around a lived-in player base (0 = never)")
+            .defineInRange("expansionDays", 2, 0, 1000);
+    public static final ModConfigSpec.IntValue MAX_CAMPS = B
+            .comment("Most raider camps around one player base, the first one included")
+            .defineInRange("maxCampsPerBase", 8, 1, 64);
     public static final ModConfigSpec.DoubleValue MAP_CHANCE = B
             .comment("Chance that a squad leader killed by a player drops a map to his camp")
             .defineInRange("leaderMapChance", 1.0, 0.0, 1.0);

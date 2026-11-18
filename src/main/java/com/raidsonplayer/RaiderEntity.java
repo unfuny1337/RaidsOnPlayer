@@ -284,7 +284,7 @@ public class RaiderEntity extends Pillager {
     private void throwTnt() {
         LivingEntity t = getTarget();
         Squad s = squad();
-        int keep = s != null && (s.kind == Kind.RAID || s.kind == Kind.NIGHT) && s.state == State.OUTBOUND ? 1 : 0;
+        int keep = s != null && s.kind.assault() && s.state == State.OUTBOUND ? 1 : 0;
         if (t == null || tnt <= keep || isPassenger() || retreating()) return;
         double d = distanceTo(t);
         if (d < 5 || d > 16 || !hasLineOfSight(t)) return;
@@ -803,7 +803,7 @@ public class RaiderEntity extends Pillager {
         private boolean knowsLayout() {
             Squad s = squad();
             Base b = s == null ? null : base(s);
-            return b != null && s.kind == Kind.NIGHT && b.freshIntel;
+            return b != null && RaidManager.knowsLayout(s, b);
         }
 
         private boolean wallAhead() {
@@ -888,7 +888,7 @@ public class RaiderEntity extends Pillager {
                 lookAt = Vec3.atCenterOf(b.home).add(0, 2, 0);
                 return Vec3.atBottomCenterOf(level().getHeightmapPos(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, s.target));
             }
-            if (role() != Role.ARTILLERYMAN || getTarget() != null || s.kind != Kind.RAID && s.kind != Kind.NIGHT) return null;
+            if (role() != Role.ARTILLERYMAN || getTarget() != null || !s.kind.assault()) return null;
             Vec3 dest = Vec3.atBottomCenterOf(RaidManager.dest(s, b));
             if (s.state != State.ATTACK && !(s.state == State.OUTBOUND && distanceToSqr(dest) < 40 * 40)) return null;
             lookAt = dest.add(0, 2, 0);

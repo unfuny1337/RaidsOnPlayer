@@ -226,5 +226,24 @@ Gotchas:
 25. A digger moved away mid-dig kept "mining" the old block for up to 30 s. Fix: the dig fails when the block is out of reach.
 26. Debug lines (flank, throw, boats, undermine) are LOG.debug; the dev run logs INFO only, so switch them to info to watch.
 
+## Full-sized raids (2026-11-18)
+Request: a "full sized raid", mostly at night, sometimes by day; wave defense with a stage-dependent number of waves; late
+waves send more than one squad; only against a base a scout has reconned; a chance on night raids, a lower one on day raids.
+Built: squad kind `FULL`, Base fields `wave/waves/nextWave/waveAt/waveArrived` (saved). `Composition.waves(stage)` = stage + 1,
+`waveSquads` = 1 in the first half, 2 after, 3 in the last wave from stage 3 ([1,2], [1,2,2], [1,1,2,3], [1,1,2,2,3]; tested);
+each squad is the night raid squad (`Composition.squad`). `RaidManager.tickFullRaid`: next wave 30 s after the current one is
+beaten (all its squads dead or retreating), or after 5 min regardless; called off if nobody is within 128 blocks of home when a
+wave is due. Triggers: `launchNight` with a fresh scout report rolls `fullRaidNightChance` (0.5); a due day raid on a base in
+`lastScouted` rolls `fullRaidDayChance` (0.01; day raids come every 2-4 days, night raids about one in 35 days, so this keeps most
+full raids at night). Full squads fight like night squads (no steal limit or timeout), ignore dawn, call one strike each at
+stage 3+ (artilleryman flare), count as knowing the layout (more TNT), block sleeping, and keep the gate open between waves.
+`/rop full` starts one now; `/rop info` shows the wave.
+Verified in game (stage 1): `/rop full` gave "2 waves", wave 1 (1 squad) reached the base, was killed, "Wave 1 of 2 is beaten!
+The next one comes in 30 seconds", the final wave of 2 squads came 30 s later, then "You held off the full-sized raid!".
+With both chances at 1.0: `/rop night launch` became a full raid and its squad kept attacking at dawn (time 23500); leaving
+during the break gave "Nobody was home: the raiders called off the full-sized raid"; a due day raid became a full raid
+(it waited until the camp had 2+ raiders, as day raids do).
+Not verified: stages 2-4 wave sizes in game (unit tested only), the 5-minute overdue wave, sleeping blocked during a full raid.
+
 ## Next step
 Install into the user's instance (ask first; the instance is missing ritchiesprojectilelib). Push the branch when asked. Next ideas: sleep-blocking check with a real player, tunnelling under obsidian, a clean flank test on untouched ground.

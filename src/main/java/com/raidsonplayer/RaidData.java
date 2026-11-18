@@ -19,8 +19,16 @@ import java.util.*;
 /** World state: progression stage, player bases with their raider camps, squads (raiders as data) and scout reports. */
 public class RaidData extends SavedData {
     public enum State { GARRISON, OUTBOUND, ATTACK, RETREAT }
-    /** RAID = day raid by the garrison; NIGHT = night raid squad; SCOUT: ATTACK means watching the base; PATROL: OUTBOUND to a waypoint. */
-    public enum Kind { GARRISON, RAID, NIGHT, PATROL, SCOUT }
+    /**
+     * RAID = day raid by the garrison; NIGHT = night raid squad; FULL = a squad of a full-sized raid wave;
+     * SCOUT: ATTACK means watching the base; PATROL: OUTBOUND to a waypoint.
+     */
+    public enum Kind {
+        GARRISON, RAID, NIGHT, PATROL, SCOUT, FULL;
+
+        /** Out to attack a player base. */
+        public boolean assault() { return this == RAID || this == NIGHT || this == FULL; }
+    }
 
     public int stage = 1;
     public final Map<UUID, Base> bases = new LinkedHashMap<>();
@@ -44,6 +52,10 @@ public class RaidData extends SavedData {
         public boolean nightPlanned, freshIntel, scoutSent;
         public int strikes;
         @Nullable public UUID scout, patrol;
+        // full-sized raid: wave `wave` of `waves` is out (waves == 0: none); the next sets out at nextWave (0: not yet due)
+        public int wave, waves;
+        public long nextWave, waveAt;
+        public boolean waveArrived;
     }
 
     public static class Squad {
@@ -110,6 +122,11 @@ public class RaidData extends SavedData {
             t.putInt("strikes", b.strikes);
             if (b.scout != null) t.putUUID("scout", b.scout);
             if (b.patrol != null) t.putUUID("patrol", b.patrol);
+            t.putInt("wave", b.wave);
+            t.putInt("waves", b.waves);
+            t.putLong("nextWave", b.nextWave);
+            t.putLong("waveAt", b.waveAt);
+            t.putBoolean("waveArrived", b.waveArrived);
             bl.add(t);
         }
         tag.put("bases", bl);
@@ -180,6 +197,11 @@ public class RaidData extends SavedData {
             b.strikes = t.getInt("strikes");
             if (t.hasUUID("scout")) b.scout = t.getUUID("scout");
             if (t.hasUUID("patrol")) b.patrol = t.getUUID("patrol");
+            b.wave = t.getInt("wave");
+            b.waves = t.getInt("waves");
+            b.nextWave = t.getLong("nextWave");
+            b.waveAt = t.getLong("waveAt");
+            b.waveArrived = t.getBoolean("waveArrived");
             d.bases.put(b.id, b);
         }
         for (Tag e : tag.getList("squads", Tag.TAG_COMPOUND)) {

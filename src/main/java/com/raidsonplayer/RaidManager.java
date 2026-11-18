@@ -138,7 +138,7 @@ public final class RaidManager {
         }
         double seen = level.getServer().getPlayerList().getViewDistance() * 16.0;
         if (!level.getPlayers(p -> !p.isSpectator() && horizontalDist(p.position(), Vec3.atCenterOf(b.camp)) < seen).isEmpty()) b.lastSeen = t;
-        if (b.campStage != d.stage && b.raid == null && nightSquads(d, b).isEmpty() && t - b.lastSeen >= SEEN_UNSEEN_TICKS && campLoaded(level, b))
+        if (b.campStage != d.stage && b.raid == null && b.waves == 0 && nightSquads(d, b).isEmpty() && t - b.lastSeen >= SEEN_UNSEEN_TICKS && campLoaded(level, b))
             rebuild(level, d, b);
 
         Squad g = d.squads.get(b.garrison);
@@ -147,7 +147,12 @@ public final class RaidManager {
             reinforce(g, d.stage, 1);
         }
         boolean night = night(level);
-        if (g != null && b.raid == null && !night && t >= b.nextRaid && canRaid(g) && memberNear(level, b, 128)) startRaid(level, d, b, g, t);
+        if (g != null && b.raid == null && b.waves == 0 && !night && t >= b.nextRaid && canRaid(g) && memberNear(level, b, 128)) {
+            if (scouted(d, b) && level.random.nextDouble() < Config.FULL_DAY_CHANCE.get()) {
+                b.nextRaid = t + raidInterval(level);
+                startFullRaid(level, d, b, t);
+            } else startRaid(level, d, b, g, t);
+        }
 
         // Tower cannons shell the player base when it is within range, someone is home and the artilleryman is in camp.
         if (!b.cannons.isEmpty() && t >= b.nextCannon && horizontalDist(Vec3.atCenterOf(b.camp), Vec3.atCenterOf(b.home)) <= CANNON_RANGE
@@ -159,6 +164,7 @@ public final class RaidManager {
 
         tickNightPlan(level, d, b, t, night);
         tickNightRaid(level, d, b, t, night);
+        tickFullRaid(level, d, b, t);
         tickPatrolRoll(level, d, b, t);
     }
 
@@ -392,16 +398,14 @@ public final class RaidManager {
             }
         }
         boolean fresh = target == b && b.freshIntel;
-        List<List<Role>> parties = Composition.night(d.stage, new Random(level.random.nextLong()), Config.demomanChance(d.stage));
-        Vec3 camp = Vec3.atBottomCenterOf(target.camp), home = Vec3.atBottomCenterOf(target.home);
-        Vec3 side = new Vec3(-(home.z - camp.z), 0, home.x - camp.x).normalize();
-        int total = 0;
-        for (int i = 0; i < parties.size(); i++) {
-            Squad s = newSquad(target, Kind.NIGHT, State.OUTBOUND, camp.add(side.scale((i - (parties.size() - 1) / 2.0) * 4)), parties.get(i), t);
-            s.target = BlockPos.containing(home.add(side.scale((i - (parties.size() - 1) / 2.0) * 8))); // fan out on arrival
-            d.squads.put(s.id, s);
-            total += s.count();
+        if (target.waves > 0) return; // a full-sized raid is already on there
+        if (fresh && level.random.nextDouble() < Config.FULL_NIGHT_CHANCE.get()) { // the scout's report calls for everything they have
+            b.scout = null;
+            startFullRaid(level, d, b, t);
+            return;
         }
+        List<List<Role>> parties = Composition.night(d.stage, new Random(level.random.nextLong()), Config.demomanChance(d.stage));
+        int total = sendOut(d, target, Kind.NIGHT, parties, t);
         target.freshIntel = fresh; // demomen work better with a fresh report
         target.strikes = fresh && d.stage >= 3 ? (d.stage >= 4 ? 3 + level.random.nextInt(3) : 2 + level.random.nextInt(2)) : 0;
         target.nextStrike = Long.MAX_VALUE; // set when the first squad arrives
@@ -415,6 +419,84 @@ public final class RaidManager {
         horn(level, target);
         if (target != b) horn(level, b);
         RaidsOnPlayer.LOG.info("Night raid of {} in {} squads from {} on {} (fresh intel {})", total, parties.size(), target.camp, target.home, fresh);
+    }
+
+    /** Squads march out of the camp side by side and fan out on arrival, hitting the home from several sides. Returns the head count. */
+    static int sendOut(RaidData d, Base b, Kind kind, List<List<Role>> parties, long t) {
+        Vec3 camp = Vec3.atBottomCenterOf(b.camp), home = Vec3.atBottomCenterOf(b.home);
+        Vec3 side = new Vec3(-(home.z - camp.z), 0, home.x - camp.x).normalize();
+        int total = 0;
+        for (int i = 0; i < parties.size(); i++) {
+            double o = i - (parties.size() - 1) / 2.0;
+            Squad s = newSquad(b, kind, State.OUTBOUND, camp.add(side.scale(o * 4)), parties.get(i), t);
+            s.target = BlockPos.containing(home.add(side.scale(o * 8)));
+            d.squads.put(s.id, s);
+            total += s.count();
+        }
+        return total;
+    }
+
+    // ---------------------------------------------------------------- full-sized raids
+
+    static final int WAVE_BREAK = 600, WAVE_TIMEOUT = 6000; // 30 s between waves; a wave still fighting after 5 min gets the next one on top
+
+    /**
+     * Wave defense: stage + 1 waves from the camp, each sent once the last is beaten (or has fought 5 minutes); later waves
+     * send more squads. Only against a base a scout has reported. Ignores dawn, so a night one can run into the day.
+     */
+    static void startFullRaid(ServerLevel level, RaidData d, Base b, long t) {
+        b.waves = Composition.waves(d.stage);
+        b.wave = 0;
+        b.nextWave = t;
+        b.freshIntel = true; // they know the layout: demomen carry more TNT and blow walls without waiting
+        tell(level, b, "A full-sized raid! The raiders are coming at you in " + b.waves + " waves from the " + direction(b.home, b.camp) + "!", ChatFormatting.DARK_RED);
+        wake(level, b);
+        RaidsOnPlayer.LOG.info("Full raid of {} waves from {} on {}", b.waves, b.camp, b.home);
+        launchWave(level, d, b, t);
+    }
+
+    static List<Squad> fullSquads(RaidData d, Base b) {
+        return d.squads.values().stream().filter(s -> s.kind == Kind.FULL && s.base.equals(b.id)).toList();
+    }
+
+    static void tickFullRaid(ServerLevel level, RaidData d, Base b, long t) {
+        if (b.waves == 0) return;
+        boolean fighting = fullSquads(d, b).stream().anyMatch(s -> s.state != State.RETREAT);
+        if (b.wave >= b.waves) { // the last wave is out: the raid is over when it is beaten
+            if (!fighting) endFullRaid(level, d, b, true);
+            return;
+        }
+        if (fighting && t - b.waveAt < WAVE_TIMEOUT) return;
+        if (b.nextWave == 0) {
+            b.nextWave = fighting ? t : t + WAVE_BREAK;
+            if (!fighting) tell(level, b, "Wave " + b.wave + " of " + b.waves + " is beaten! The next one comes in 30 seconds.", ChatFormatting.GOLD);
+        }
+        if (t >= b.nextWave) launchWave(level, d, b, t);
+    }
+
+    static void launchWave(ServerLevel level, RaidData d, Base b, long t) {
+        if (!memberNear(level, b, 128)) { endFullRaid(level, d, b, false); return; }
+        b.wave++;
+        b.nextWave = 0;
+        b.waveAt = t;
+        b.waveArrived = false;
+        Random r = new Random(level.random.nextLong());
+        List<List<Role>> parties = new ArrayList<>();
+        for (int i = Composition.waveSquads(d.stage, b.wave); i > 0; i--) parties.add(Composition.squad(d.stage, r, Config.demomanChance(d.stage)));
+        int total = sendOut(d, b, Kind.FULL, parties, t);
+        setGate(level, b, true);
+        horn(level, b);
+        tell(level, b, (b.wave == b.waves ? "Final wave! " : "Wave " + b.wave + " of " + b.waves + ": ") + total + " raiders in "
+                + parties.size() + (parties.size() == 1 ? " squad" : " squads") + " are coming!", ChatFormatting.RED);
+        RaidsOnPlayer.LOG.info("Full raid wave {}/{}: {} squads, {} raiders", b.wave, b.waves, parties.size(), total);
+    }
+
+    static void endFullRaid(ServerLevel level, RaidData d, Base b, boolean won) {
+        tell(level, b, won ? "You held off the full-sized raid! All " + b.waves + " waves are beaten."
+                : "Nobody was home: the raiders called off the full-sized raid.", won ? ChatFormatting.GREEN : ChatFormatting.GOLD);
+        b.wave = b.waves = 0;
+        b.nextWave = 0;
+        if (fullSquads(d, b).isEmpty() && nightSquads(d, b).isEmpty()) setGate(level, b, false);
     }
 
     /** The horn wakes everyone sleeping near the base. */
@@ -431,7 +513,7 @@ public final class RaidManager {
     static boolean nightRaidNear(ServerPlayer p) {
         RaidData d = RaidData.get(p.server);
         return d.bases.values().stream().anyMatch(b -> horizontalDist(p.position(), Vec3.atCenterOf(b.home)) < 128
-                && nightSquads(d, b).stream().anyMatch(s -> s.state != State.RETREAT));
+                && (b.waves > 0 || nightSquads(d, b).stream().anyMatch(s -> s.state != State.RETREAT)));
     }
 
     static void tickNightRaid(ServerLevel level, RaidData d, Base b, long t, boolean night) {
@@ -461,7 +543,7 @@ public final class RaidManager {
     static void callStrike(ServerLevel level, RaidData d, Base b) {
         RaiderEntity spotter = null;
         for (Squad s : d.squads.values())
-            if (s.base.equals(b.id) && (s.kind == Kind.RAID || s.kind == Kind.NIGHT) && s.state != State.RETREAT)
+            if (s.base.equals(b.id) && s.kind.assault() && s.state != State.RETREAT)
                 for (UUID u : s.live)
                     if (level.getEntity(u) instanceof RaiderEntity e && e.role() == Role.ARTILLERYMAN && e.isAlive() && e.strikeAt < 0
                             && (spotter == null || spotter.spotted() == null && e.spotted() != null)) spotter = e;
@@ -565,7 +647,7 @@ public final class RaidManager {
     }
 
     static void tickRaid(ServerLevel level, RaidData d, Squad s, Base b, boolean mat, long t) {
-        boolean nightRaid = s.kind == Kind.NIGHT;
+        boolean nightRaid = s.kind != Kind.RAID; // night and full-raid squads: one of several, fight until beaten
         String who = nightRaid ? "A raider squad" : "The raiders";
         switch (s.state) {
             case GARRISON -> { }
@@ -576,7 +658,10 @@ public final class RaidManager {
                 } else if (horizontalDist(s.pos, Vec3.atBottomCenterOf(dest(s, b))) < 24) {
                     if (mat) {
                         enter(s, State.ATTACK, t);
-                        if (nightRaid && b.nextStrike == Long.MAX_VALUE) {
+                        if (s.kind == Kind.FULL) {
+                            if (!b.waveArrived) tell(level, b, "Wave " + b.wave + " has reached your base!", ChatFormatting.RED);
+                            b.waveArrived = true;
+                        } else if (nightRaid && b.nextStrike == Long.MAX_VALUE) {
                             b.nextStrike = t + 300 + level.random.nextInt(300); // first shells soon after they reach the walls
                             tell(level, b, "The night raiders have reached your base!", ChatFormatting.RED);
                         } else if (!nightRaid) tell(level, b, "The raiders have reached your base!", ChatFormatting.RED);
@@ -584,7 +669,7 @@ public final class RaidManager {
                 }
             }
             case ATTACK -> {
-                if (!nightRaid && d.stage >= 3 && !s.airstrike && mat && t - s.stateSince > 300 && artilleryAlive(d, b) && scouted(d, b)) {
+                if (s.kind != Kind.NIGHT && d.stage >= 3 && !s.airstrike && mat && t - s.stateSince > 300 && artilleryAlive(d, b) && scouted(d, b)) {
                     s.airstrike = true;
                     callStrike(level, d, b);
                 }
@@ -594,7 +679,7 @@ public final class RaidManager {
                 } else if (!mat || !nightRaid && (t - s.stateSince > ATTACK_TIMEOUT || s.stolen >= 2 * s.count()
                         || s.stolen > 0 && t - s.lastSteal > 600)) { // day raid: took something and found nothing more for 30 s
                     enter(s, State.RETREAT, t);
-                    tell(level, b, s.stolen > 0 ? who + " head home with your loot!" : who + " head home.", ChatFormatting.GOLD);
+                    tell(level, b, who + (nightRaid ? " heads" : " head") + (s.stolen > 0 ? " home with your loot!" : " home."), ChatFormatting.GOLD);
                 }
             }
             case RETREAT -> {
@@ -602,6 +687,9 @@ public final class RaidManager {
             }
         }
     }
+
+    /** A night raid with a fresh scout report, or a full-sized raid: demomen carry more TNT and blow walls without waiting. */
+    static boolean knowsLayout(Squad s, Base b) { return s.kind == Kind.FULL || s.kind == Kind.NIGHT && b.freshIntel; }
 
     /** Has a scout ever reported this base? (Day raid airstrikes need to know where to aim.) */
     static boolean scouted(RaidData d, Base b) { return d.lastScouted.containsValue(b.id); }
@@ -695,7 +783,7 @@ public final class RaidManager {
         s.live.clear();
         CampBuilder.deposit(level, b.camp, b.chests, loot);
         d.squads.remove(s.id);
-        if (s.kind == Kind.RAID || s.kind == Kind.PATROL || nightSquads(d, b).isEmpty()) setGate(level, b, false);
+        if (b.waves == 0 && (s.kind == Kind.RAID || s.kind == Kind.PATROL || nightSquads(d, b).isEmpty() && fullSquads(d, b).isEmpty())) setGate(level, b, false);
         if (s.id.equals(b.raid)) b.raid = null;
         if (s.id.equals(b.patrol)) b.patrol = null;
         RaidsOnPlayer.LOG.info("{} squad home at {} with {} survivors and {} stacks", s.kind, b.camp, s.count(), loot.size());
@@ -709,7 +797,7 @@ public final class RaidManager {
                 missing.remove(e.role());
                 hasWatchman |= e.watchman;
             }
-        boolean intel = s.kind == Kind.NIGHT && b.freshIntel;
+        boolean intel = knowsLayout(s, b);
         List<RaiderEntity> spawned = new ArrayList<>();
         for (Role role : missing) {
             RaiderEntity e = RaidsOnPlayer.RAIDER.get().create(level);

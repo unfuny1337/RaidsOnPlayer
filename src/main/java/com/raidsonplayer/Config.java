@@ -32,6 +32,12 @@ public final class Config {
     public static final ModConfigSpec.DoubleValue NIGHT_CHANCE = B
             .comment("Chance that the roll plans a night raid (a scout comes the day before it)")
             .defineInRange("nightRaidChance", 0.2, 0.0, 1.0);
+    public static final ModConfigSpec.DoubleValue FULL_NIGHT_CHANCE = B
+            .comment("Chance that a night raid whose scout got away is a full-sized raid instead: waves of squads, stage + 1 waves")
+            .defineInRange("fullRaidNightChance", 0.5, 0.0, 1.0);
+    public static final ModConfigSpec.DoubleValue FULL_DAY_CHANCE = B
+            .comment("Chance that a day raid on a base a scout has reported is a full-sized raid instead (day raids are far more frequent than night raids)")
+            .defineInRange("fullRaidDayChance", 0.01, 0.0, 1.0);
     public static final ModConfigSpec.DoubleValue PATROL_CHANCE = B
             .comment("Chance each in-game day that a raider patrol wanders near a base")
             .defineInRange("patrolChance", 0.3, 0.0, 1.0);

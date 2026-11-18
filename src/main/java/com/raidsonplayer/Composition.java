@@ -29,15 +29,26 @@ final class Composition {
      */
     static List<List<Role>> night(int stage, Random rnd, double demoChance) {
         int squads = switch (stage) { case 1 -> 2; case 2 -> 3 + rnd.nextInt(2); default -> 4; };
-        int size = stage + 3;
         List<List<Role>> out = new ArrayList<>();
-        for (int i = 0; i < squads; i++) {
-            List<Role> s = new ArrayList<>(List.of(LEADER, MINER));
-            if (stage >= 3) { s.add(MINER); s.add(ARTILLERYMAN); }
-            while (s.size() < size) s.add(stage >= 2 && rnd.nextDouble() < demoChance ? DEMOMAN : RAIDER);
-            out.add(s);
-        }
+        for (int i = 0; i < squads; i++) out.add(squad(stage, rnd, demoChance));
         return out;
+    }
+
+    /** One assault squad of stage + 3 (the night raid squad above; full-sized raid waves use it too). */
+    static List<Role> squad(int stage, Random rnd, double demoChance) {
+        List<Role> s = new ArrayList<>(List.of(LEADER, MINER));
+        if (stage >= 3) { s.add(MINER); s.add(ARTILLERYMAN); }
+        while (s.size() < stage + 3) s.add(stage >= 2 && rnd.nextDouble() < demoChance ? DEMOMAN : RAIDER);
+        return s;
+    }
+
+    /** Full-sized raid: stage + 1 waves. */
+    static int waves(int stage) { return stage + 1; }
+
+    /** Squads in wave `w` (1-based): one in the first half, two after that, three in the last wave from stage 3. */
+    static int waveSquads(int stage, int w) {
+        int n = waves(stage);
+        return w == n && stage >= 3 ? 3 : w > n / 2 ? 2 : 1;
     }
 
     /** Day patrol: a leader and 2-3 raiders. */

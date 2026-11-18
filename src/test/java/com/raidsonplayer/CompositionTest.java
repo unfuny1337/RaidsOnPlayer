@@ -52,4 +52,13 @@ class CompositionTest {
         }
         assertEquals(List.of(LEADER), Composition.missing(List.of(RAIDER, MINER, RAIDER), 1));
     }
+
+    @Test
+    void fullRaidWavesGrowTowardTheEnd() {
+        int[][] want = {{}, {1, 2}, {1, 2, 2}, {1, 1, 2, 3}, {1, 1, 2, 2, 3}};
+        for (int stage = 1; stage <= 4; stage++) {
+            assertEquals(want[stage].length, Composition.waves(stage));
+            for (int w = 1; w <= Composition.waves(stage); w++) assertEquals(want[stage][w - 1], Composition.waveSquads(stage, w), "stage " + stage + " wave " + w);
+        }
+    }
 }

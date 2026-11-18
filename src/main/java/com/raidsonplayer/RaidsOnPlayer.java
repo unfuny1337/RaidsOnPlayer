@@ -83,7 +83,7 @@ public class RaidsOnPlayer {
         });
     }
 
-    /** /rop info | stage | raid | rebuild | fire | gate | airstrike | night [launch] | scout | patrol  (ops only; for admins and testing) */
+    /** /rop info | stage | raid | rebuild | fire | gate | airstrike | night [launch] | full | scout | patrol  (ops only; for admins and testing) */
     static void commands(RegisterCommandsEvent e) {
         e.getDispatcher().register(Commands.literal("rop").requires(s -> s.hasPermission(2))
                 .then(Commands.literal("info").executes(c -> info(c.getSource())))
@@ -134,6 +134,11 @@ public class RaidsOnPlayer {
                     RaidManager.launchNight(level, d, b, level.getGameTime());
                     return "Night raid launched with a scout report (it falls back at dawn, so use it at night).";
                 }))))
+                .then(Commands.literal("full").executes(c -> withBase(c.getSource(), (level, d, b) -> { // full-sized raid now, skipping the scout and the roll
+                    if (b.waves > 0) return "A full-sized raid is already on (wave " + b.wave + " of " + b.waves + ").";
+                    RaidManager.startFullRaid(level, d, b, level.getGameTime());
+                    return "Full-sized raid started.";
+                })))
                 .then(Commands.literal("scout").executes(c -> withBase(c.getSource(), (level, d, b) -> {
                     RaidManager.planNight(b);
                     RaidManager.sendScout(level, d, b, level.getGameTime());
@@ -173,7 +178,8 @@ public class RaidsOnPlayer {
             sb.append("\n- home ").append(b.home.toShortString()).append(" members ").append(b.members.size())
                     .append(" camp ").append(b.camp == null ? "none" : b.camp.toShortString() + " (stage " + b.campStage + ")")
                     .append(" next raid in ").append(Math.max(0, b.nextRaid - level.getGameTime()) / 1200).append(" min")
-                    .append(b.nightPlanned ? ", night raid planned" : "").append(b.freshIntel ? ", scouted" : "");
+                    .append(b.nightPlanned ? ", night raid planned" : "").append(b.freshIntel ? ", scouted" : "")
+                    .append(b.waves > 0 ? ", full raid wave " + b.wave + "/" + b.waves : "");
             for (Squad s : d.squads.values())
                 if (s.base.equals(b.id))
                     sb.append("\n    ").append(s.kind).append(' ').append(s.state).append(' ').append(s.roles).append(" at ")

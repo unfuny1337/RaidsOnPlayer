@@ -285,5 +285,19 @@ the player out of view, 4000 ticks of daytime gave no rebuilds; jumping to the n
 other test bases') within ~30 s as their areas loaded.
 Not verified: stages 2 and 3 expansion builds in game (same code path, h 13 and 15).
 
+## Raider points, night raid buildup (2026-11-18)
+Request: replace the time-based progression with points (sleeping and killing raiders give the raiders points, so they
+progress and expand quicker); night raids more frequent, with a chance that builds up after the cooldown until guaranteed.
+User chose: points from time, sleep and kills; the stage keeps following advancements.
+Built: `RaidManager.points(d, b)` = `d.clock` (time + slept time) + the main base's `bonus` (kills), in ticks, 1200 = 1 point
+(a day of time = 20 points). Day raids, expansion, garrison regrowth, the night raid cooldown and patrols run on it (camp
+rebuilds stay on the clock: they wait for the morning). A raider killed by a player (damage source entity is a player) adds
+`killPoints` (2; a leader triple) to the base it belonged to (expansion camps credit their main base). Night raids: after the
+`nightRaidPeriodDays` (7 days' worth of points) cooldown, a roll every morning at `nightRaidChance` (0.2) + `nightRaidChanceStep`
+(0.2) per miss; a hit restarts the cooldown. Expected wait after the cooldown ~2.5 mornings, at most 5. `/rop info` shows points.
+Verified in game: killing a leader as the player (`/damage ... by Dev`) gave +6 points and moved the next day raid 21 -> 15 and
+the night cooldown 137 -> 131; a raider removed with /kill gave none. With chance 0 and step 0.5: after skipping the cooldown the
+mornings went 50% -> 100% -> planned, and the cooldown restarted at 139 points.
+
 ## Next step
 Install into the user's instance (ask first; the instance is missing ritchiesprojectilelib). Push the branch when asked. Next ideas: sleep-blocking check with a real player, tunnelling under obsidian, a clean flank test on untouched ground.

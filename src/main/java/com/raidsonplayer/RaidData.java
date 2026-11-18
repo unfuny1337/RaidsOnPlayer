@@ -31,7 +31,7 @@ public class RaidData extends SavedData {
     }
 
     public int stage = 1;
-    /** Day-scale timers (day raids, expansion, regrowth, night rolls, patrols) run on this: game time plus time skipped by sleeping. */
+    /** Time part of the raider points (RaidManager.points): game time plus time skipped by sleeping, in ticks. */
     public long clock;
     long lastTick, lastDay; // not saved: what the clock last saw
     public final Map<UUID, Base> bases = new LinkedHashMap<>();
@@ -64,6 +64,10 @@ public class RaidData extends SavedData {
         public long nextExpand;
         /** Raider clock time from which the camp may be rebuilt for a new stage (the morning after the stage went up); 0 = nothing pending. */
         public long upgradeAt;
+        /** Raider points from raiders killed here (in ticks, like the clock; 1200 = 1 point). Expansion camps use their main base's. */
+        public long bonus;
+        /** Mornings in a row the night raid roll missed after the cooldown; each one raises the chance. */
+        public int nightMisses;
     }
 
     public static class Squad {
@@ -139,6 +143,8 @@ public class RaidData extends SavedData {
             if (b.parent != null) t.putUUID("parent", b.parent);
             t.putLong("nextExpand", b.nextExpand);
             t.putLong("upgradeAt", b.upgradeAt);
+            t.putLong("bonus", b.bonus);
+            t.putInt("nightMisses", b.nightMisses);
             bl.add(t);
         }
         tag.put("bases", bl);
@@ -218,6 +224,8 @@ public class RaidData extends SavedData {
             if (t.hasUUID("parent")) b.parent = t.getUUID("parent");
             b.nextExpand = t.getLong("nextExpand");
             b.upgradeAt = t.getLong("upgradeAt");
+            b.bonus = t.getLong("bonus");
+            b.nightMisses = t.getInt("nightMisses");
             d.bases.put(b.id, b);
         }
         for (Tag e : tag.getList("squads", Tag.TAG_COMPOUND)) {

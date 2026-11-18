@@ -79,6 +79,15 @@ public final class RaidManager {
     static long dayTime(Level level) { return level.getDayTime() % 24000; }
 
     /**
+     * A base's raider points, in ticks (1200 = 1 point, so a day of time is 20): the clock (time and sleep) plus kills at the base.
+     * Day raids, camp expansion, garrison regrowth, the night raid cooldown and patrols all run on it.
+     */
+    static long points(RaidData d, Base b) {
+        Base main = b.parent != null ? d.bases.getOrDefault(b.parent, b) : b;
+        return d.clock + main.bonus;
+    }
+
+    /**
      * Ticks that passed, plus however far the day jumped beyond them (sleeping, /time add). Setting the time back is ignored,
      * and with the daylight cycle off days still pass at the normal rate. Starts at game time, so older saves keep their timers.
      */
@@ -131,8 +140,8 @@ public final class RaidManager {
             if (near == null) {
                 near = new Base();
                 near.home = rp.immutable();
-                near.nextRaid = d.clock + raidInterval(server.overworld());
-                near.lastRegen = d.clock;
+                near.nextRaid = points(d, near) + raidInterval(server.overworld());
+                near.lastRegen = points(d, near);
                 d.bases.put(near.id, near);
                 RaidsOnPlayer.LOG.info("New player base at {} for {}", rp, p.getName().getString());
             }
@@ -165,14 +174,15 @@ public final class RaidManager {
         }
 
         Squad g = d.squads.get(b.garrison);
-        if (g != null && d.clock - b.lastRegen >= 24000) { // one raider a day joins until the camp is at full strength
-            b.lastRegen = d.clock;
+        long pts = points(d, b);
+        if (g != null && pts - b.lastRegen >= 24000) { // one raider per day's worth of points joins until the camp is at full strength
+            b.lastRegen = pts;
             reinforce(g, d.stage, cap(b, d.stage), 1);
         }
         boolean night = night(level);
-        if (g != null && b.raid == null && b.waves == 0 && !night && d.clock >= b.nextRaid && canRaid(g) && memberNear(level, b, 128)) {
+        if (g != null && b.raid == null && b.waves == 0 && !night && pts >= b.nextRaid && canRaid(g) && memberNear(level, b, 128)) {
             if (scouted(d, b) && level.random.nextDouble() < Config.FULL_DAY_CHANCE.get()) {
-                b.nextRaid = d.clock + raidInterval(level);
+                b.nextRaid = pts + raidInterval(level);
                 startFullRaid(level, d, b, t);
             } else startRaid(level, d, b, g, t);
         }
@@ -199,9 +209,10 @@ public final class RaidManager {
     static void tickExpansion(ServerLevel level, RaidData d, Base b, long t) {
         int days = Config.EXPAND_DAYS.get();
         if (days <= 0 || b.members.isEmpty()) return;
-        if (b.nextExpand == 0) b.nextExpand = d.clock + days * 24000L;
-        if (d.clock < b.nextExpand) return;
-        b.nextExpand = d.clock + days * 24000L;
+        long pts = points(d, b);
+        if (b.nextExpand == 0) b.nextExpand = pts + days * 24000L;
+        if (pts < b.nextExpand) return;
+        b.nextExpand = pts + days * 24000L;
         if (camps(d, b) < Config.MAX_CAMPS.get()) expand(level, d, b, t);
     }
 
@@ -211,8 +222,8 @@ public final class RaidManager {
         x.parent = b.id;
         x.home = b.home;
         x.members.addAll(b.members);
-        x.nextRaid = d.clock + raidInterval(level);
-        x.lastRegen = d.clock;
+        x.nextRaid = points(d, x) + raidInterval(level);
+        x.lastRegen = points(d, x);
         d.bases.put(x.id, x);
     }
 
@@ -374,7 +385,7 @@ public final class RaidManager {
         d.squads.put(s.id, s);
         setGate(level, b, true);
         b.raid = s.id;
-        b.nextRaid = d.clock + raidInterval(level);
+        b.nextRaid = points(d, b) + raidInterval(level);
         tell(level, b, going.size() + " raiders set out from their camp to the " + direction(b.home, b.camp) + "!", ChatFormatting.RED);
         horn(level, b);
         RaidsOnPlayer.LOG.info("Raid of {} {} launched from {} at base {}", going.size(), going, b.camp, b.home);
@@ -391,10 +402,17 @@ public final class RaidManager {
     /** Weekly roll in the morning; the scout goes out that day; at dusk the raid launches against what the raiders know. */
     static void tickNightPlan(ServerLevel level, RaidData d, Base b, long t, boolean night) {
         long dt = dayTime(level);
-        if (b.nextNight == 0) b.nextNight = d.clock + Config.NIGHT_PERIOD_DAYS.get() * 24000L;
-        if (!b.members.isEmpty() && !b.nightPlanned && d.clock >= b.nextNight && dt < 6000) { // rolled in the morning so a scout has the day
-            b.nextNight = d.clock + Config.NIGHT_PERIOD_DAYS.get() * 24000L;
-            if (level.random.nextDouble() < Config.NIGHT_CHANCE.get()) planNight(b);
+        long pts = points(d, b);
+        if (b.nextNight == 0) b.nextNight = pts + Config.NIGHT_PERIOD_DAYS.get() * 24000L;
+        if (!b.members.isEmpty() && !b.nightPlanned && pts >= b.nextNight && dt < 6000) { // rolled in the morning so a scout has the day
+            if (level.random.nextDouble() < nightChance(b)) {
+                planNight(b);
+                b.nightMisses = 0;
+                b.nextNight = pts + Config.NIGHT_PERIOD_DAYS.get() * 24000L;
+            } else {
+                b.nightMisses++;
+                b.nextNight = pts + 24000 - dt; // try again next morning, with better odds
+            }
         }
         if (!b.nightPlanned) return;
         if (!night && dt < 11000 && !b.scoutSent && memberNear(level, b, 128)) sendScout(level, d, b, t);
@@ -404,6 +422,9 @@ public final class RaidManager {
             launchNight(level, d, b, t);
         }
     }
+
+    /** Chance of this morning's night raid roll: the base chance plus one step per morning it has missed, up to certain. */
+    static double nightChance(Base b) { return Math.min(1, Config.NIGHT_CHANCE.get() + b.nightMisses * Config.NIGHT_CHANCE_STEP.get()); }
 
     static void planNight(Base b) {
         b.nightPlanned = true;
@@ -627,8 +648,9 @@ public final class RaidManager {
     // ---------------------------------------------------------------- patrols
 
     static void tickPatrolRoll(ServerLevel level, RaidData d, Base b, long t) {
-        if (b.patrol != null || b.members.isEmpty() || d.clock < b.nextPatrol || dayTime(level) > 6000) return;
-        b.nextPatrol = d.clock + 24000 - dayTime(level); // next morning
+        long pts = points(d, b);
+        if (b.patrol != null || b.members.isEmpty() || pts < b.nextPatrol || dayTime(level) > 6000) return;
+        b.nextPatrol = pts + 24000 - dayTime(level); // next morning
         if (level.random.nextDouble() >= Config.PATROL_CHANCE.get()) return;
         startPatrol(level, d, b, t);
     }
@@ -966,7 +988,7 @@ public final class RaidManager {
 
     // ---------------------------------------------------------------- events
 
-    public static void onDeath(RaiderEntity e) {
+    public static void onDeath(RaiderEntity e, boolean byPlayer) {
         if (e.squadId == null || !(e.level() instanceof ServerLevel sl)) return;
         RaidData d = RaidData.get(sl.getServer());
         Squad s = d.squads.get(e.squadId);
@@ -974,6 +996,10 @@ public final class RaidManager {
         s.roles.remove(e.role());
         Base b = d.bases.get(s.base);
         if (b == null) return;
+        if (byPlayer) { // revenge: every raider a player kills brings their next moves closer
+            Base main = b.parent != null ? d.bases.getOrDefault(b.parent, b) : b;
+            main.bonus += Config.KILL_POINTS.get() * (e.role() == Role.LEADER ? 3 : 1) * 1200L;
+        }
         if (s.kind == Kind.SCOUT) tell(sl, b, "You killed the raider scout before he could report back.", ChatFormatting.GREEN);
         else if (e.role() == Role.LEADER && s.kind != Kind.GARRISON && s.count() > 0)
             tell(sl, b, "A squad leader has fallen! His squad falters.", ChatFormatting.GREEN);

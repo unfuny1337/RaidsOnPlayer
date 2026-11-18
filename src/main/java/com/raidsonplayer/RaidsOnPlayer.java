@@ -65,7 +65,7 @@ public class RaidsOnPlayer {
                         src.getDirectEntity() == null ? null : src.getDirectEntity().getType().toShortString(),
                         src.getDirectEntity() == null ? null : src.getDirectEntity().getTags(),
                         src.getEntity() == null ? null : src.getEntity().getType().toShortString());
-                RaidManager.onDeath(r);
+                RaidManager.onDeath(r, src.getEntity() instanceof Player);
             }
         });
         // Raider TNT (thrown or breaching) still hurts, but leaves blocks alone when raider griefing is off.
@@ -182,7 +182,10 @@ public class RaidsOnPlayer {
         for (Base b : d.bases.values()) {
             sb.append(b.parent != null ? "\n  + expansion camp of home " : "\n- home ").append(b.home.toShortString()).append(" members ").append(b.members.size())
                     .append(" camp ").append(b.camp == null ? "none" : b.camp.toShortString() + " (stage " + b.campStage + ")")
-                    .append(" next raid in ").append(Math.max(0, b.nextRaid - d.clock) / 1200).append(" min")
+                    .append(" next raid in ").append(Math.max(0, b.nextRaid - RaidManager.points(d, b)) / 1200).append(" pts")
+                    .append(b.parent == null ? ", kills +" + b.bonus / 1200 + " pts, next camp in " + Math.max(0, b.nextExpand - RaidManager.points(d, b)) / 1200
+                            + " pts, night raid " + (RaidManager.points(d, b) < b.nextNight && b.nightMisses == 0
+                            ? "in " + (b.nextNight - RaidManager.points(d, b)) / 1200 + " pts" : (int) (RaidManager.nightChance(b) * 100) + "% each morning") : "")
                     .append(b.nightPlanned ? ", night raid planned" : "").append(b.freshIntel ? ", scouted" : "")
                     .append(b.waves > 0 ? ", full raid wave " + b.wave + "/" + b.waves : "");
             for (Squad s : d.squads.values())

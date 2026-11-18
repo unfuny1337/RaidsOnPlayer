@@ -8,10 +8,10 @@ public final class Config {
     private static final ModConfigSpec.Builder B = new ModConfigSpec.Builder();
 
     public static final ModConfigSpec.IntValue RAID_MIN_DAYS = B
-            .comment("Minimum in-game days between raids on a base")
+            .comment("Minimum raider points between day raids from a camp, in days' worth (a day of time is 20 points; sleeping and kills add more)")
             .defineInRange("raidIntervalMinDays", 2, 1, 1000);
     public static final ModConfigSpec.IntValue RAID_MAX_DAYS = B
-            .comment("Maximum in-game days between raids on a base")
+            .comment("Maximum, same unit")
             .defineInRange("raidIntervalMaxDays", 4, 1, 1000);
     public static final ModConfigSpec.EnumValue<LootAmount> LOOT = B
             .comment("How much loot raider base chests hold")
@@ -27,11 +27,17 @@ public final class Config {
             .comment("Raiders break doors and dirt, miners dig tunnels and demomen blow walls (also needs the mobGriefing gamerule)")
             .define("raidersBreakBlocks", true);
     public static final ModConfigSpec.IntValue NIGHT_PERIOD_DAYS = B
-            .comment("Every this many in-game days, a base rolls for a night raid")
+            .comment("Night raid cooldown in days' worth of raider points; after it, a roll every morning until a night raid is planned")
             .defineInRange("nightRaidPeriodDays", 7, 1, 1000);
     public static final ModConfigSpec.DoubleValue NIGHT_CHANCE = B
-            .comment("Chance that the roll plans a night raid (a scout comes the day before it)")
+            .comment("Chance of the first morning roll after the cooldown (a scout comes that day, the raid at dusk)")
             .defineInRange("nightRaidChance", 0.2, 0.0, 1.0);
+    public static final ModConfigSpec.DoubleValue NIGHT_CHANCE_STEP = B
+            .comment("Added to the night raid chance after each morning it misses, so one is guaranteed in the end")
+            .defineInRange("nightRaidChanceStep", 0.2, 0.0, 1.0);
+    public static final ModConfigSpec.IntValue KILL_POINTS = B
+            .comment("Raider points per raider a player kills (a leader counts triple). Points bring day raids, new camps, garrison regrowth and night raids closer")
+            .defineInRange("killPoints", 2, 0, 1000);
     public static final ModConfigSpec.DoubleValue FULL_NIGHT_CHANCE = B
             .comment("Chance that a night raid whose scout got away is a full-sized raid instead: waves of squads, stage + 1 waves")
             .defineInRange("fullRaidNightChance", 0.5, 0.0, 1.0);
@@ -51,7 +57,7 @@ public final class Config {
             .comment("Same, stage 4")
             .defineInRange("demomanChanceStage4", 0.35, 0.0, 1.0);
     public static final ModConfigSpec.IntValue EXPAND_DAYS = B
-            .comment("Every this many in-game days the raiders build another camp around a lived-in player base (0 = never)")
+            .comment("The raiders build another camp around a lived-in player base every this many days' worth of raider points (0 = never)")
             .defineInRange("expansionDays", 2, 0, 1000);
     public static final ModConfigSpec.IntValue MAX_CAMPS = B
             .comment("Most raider camps around one player base, the first one included")

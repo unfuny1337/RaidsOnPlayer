@@ -118,5 +118,73 @@ More gotchas:
 Not verified: crank direction for gate orientations other than west (rotation should preserve it); the stage 2 press/water wheel
 orientation up close (decorative, doesn't spin).
 
+## Biome ground and chest facing (2026-11-17, after user feedback)
+- **Ground** is read from untouched terrain on a ring 4 blocks outside the build (most common full surface block and the block under it,
+  ignoring fluids, logs and block entities), so a rebuild reads natural terrain too. Under-blocks that fall (sand) become sandstone,
+  because the fill can sit on ponds. Stage 2 yard: coarse dirt and path on grassland, the biome's own ground elsewhere.
+  Cold biomes get snow on open ground (vanilla `Biome.shouldSnow`, MOTION_BLOCKING top at floor level only).
+- **Chests:** tent chests sit side by side at the front-left corner (concept.png), facing out. Loot room side rows face the aisle.
+- Verified in game: desert stage 1 (sand, chests facing out) and stage 2 (sand ring and yard, acacia; chest facings checked with
+  `execute if block`), snowy stage 4 (snow-covered ring and yard), savanna and jungle (grass).
+15. Camp placement skipped sites within `min` of *any* home, including its own. Rounding puts a site at exactly `min` just inside,
+    so with min == max no camp was ever placed. Fixed: only other bases' homes count.
+
+## Milestone 3 intake: classes, night raids, scouts, patrols (spec `C:\Users\unfuny\Desktop\prompt2.txt`, 2026-11-18)
+User decisions:
+- Day raids stay (small steal-and-run raids by the garrison). Night raids are the new big multi-squad assaults.
+- Night raid: every 7 days a 20% roll plans one. A scout comes that day. If he escapes, the raid hits the current base and gets
+  airstrikes (stage 3+). If he's killed, the raid hits the last base a scout reported, without airstrikes. If there's none, it's called off.
+- Extras: leader wears the ominous banner, scout watches through a spyglass, a leader killed by a player drops a map to the camp.
+- The spec overrides the old "no block breaking" decision: raiders break doors and dig dirt, miners tunnel, demomen use TNT.
+  This is gated by config `raidersBreakBlocks` and the `mobGriefing` gamerule.
+
+Design:
+- `Role` {RAIDER, MINER, LEADER, ARTILLERYMAN, DEMOMAN, SCOUT}. One entity type with a synced role (name, arm pose). Squads hold
+  a role list instead of a count. Death removes that role, and materializing spawns the roles not yet live.
+- Squad `kind` {GARRISON, RAID (day), NIGHT, PATROL, SCOUT} plus a `target` (home, watch point or waypoint).
+- Gear (material by stage: stone, iron, iron/rare diamond, diamond): raider = sword + shovel; miner = pickaxe + axe;
+  leader = sword one tier up + bow + banner; artilleryman = sword + bow; demoman = TNT, then a sword; scout = sword + spyglass.
+- Digging is like a player mining (speed / hardness / 30, or 100 without the right tool). Unbreakable: hardness < 0, block
+  entities other than doors, beds, blocks next to fluids, blocks the tools can't harvest. A miner blocked at his level digs
+  stairs down and tunnels under, then comes back up.
+- Leader: followers keep to him and take his target. After his death the squad is leaderless: it retreats once 25% are dead
+  or below 50% health, and it no longer follows or focuses fire.
+- Airstrikes need stage 3+ and a living artilleryman (camp or raid). Night raids also need a fresh scout report.
+  Stage 4 strikes are more frequent and tighter. Each strike lands at a random offset.
+- Night raid squads per stage: 2x4, 3-4x5, 4x6, 4x7 with the required classes. Demomen replace raiders by a per-stage chance.
+  The horn wakes sleepers, and sleeping is blocked while a night raid is on.
+- Patrols: on a daily roll, a leader and 2-3 raiders wander near the player base and go home at dusk.
+- Plan: 3a classes + digging + leader in day raids; 3b night raids + scout + demoman + artillery rules + map;
+  3c patrols + config + polish. (In the end it was all built in one pass, then tested and fixed in game.)
+
+## Milestone 3 results (branch `milestone-3`, 2026-11-18)
+Test setup: a walled test home on flat desert (cobblestone, dirt and stone brick walls, an iron door with no button, 2 chests),
+camp 35 blocks away (dev config 32/40, restored to 100/300 afterwards). Commands: `/rop night [launch]`, `/rop scout`, `/rop patrol`.
+Verified in game:
+1. Garrison classes and gear: leader with the ominous banner, iron swords, a demoman holding TNT. Names in /damage output ("Raider Leader").
+2. Day raid (leader, miner, demoman, 2 raiders): the demoman's TNT breached the north wall, raiders dug the sand, and the squad got inside.
+3. Night raid, stage 3. It launched by itself at dusk after the scout's report: "24 raiders in 4 squads", each with a leader,
+   2 miners, an artilleryman, and raiders/demomen. Airstrikes came about 25 s after arrival and then about a minute apart.
+   Leader deaths gave "His squad falters" and a leaderless retreat. At dawn: "Dawn breaks...", and everyone retreated.
+   Survivors rejoined the garrison up to full strength.
+4. Scout at ~210 blocks: he marched as data, appeared, went to his post, held the spyglass up to his eye, saw the player,
+   watched for about 60 s, left, and "A raider scout got away" followed. Killing a scout gives "You killed the raider scout before
+   he could report back" and clears the fresh report.
+5. Patrol: a leader and 2 raiders wandered waypoints and headed home at dusk.
+6. A leader killed by a player dropped a "Raider Camp Map" (explorer style, red X on the camp).
+
+More gotchas:
+16. Raiders next to home but behind a wall never counted as stuck: only "more than 12 blocks away" or "stealing" counted, and with
+    2 chests only 2 raiders stole. Fix: in ATTACK, a raider is also stuck when there's no path to home (`cutOff`).
+17. The raiders' own airstrikes wiped out the attackers. CBC blast damage carries no entity (msgId
+    `createbigcannons.cannon_projectile`, direct null), so the raiders' shells are recognised by place and time (`Artillery.ZONES`).
+    Raiders take x0.1 from their own shells and TNT. Player-fired shells still hit in full.
+18. A demoman died to his own TNT. Fix: 4 s fuse, he runs straight away, and squad mates within 9 blocks flee (`FleeBombGoal`).
+19. Patrol waypoints and the scout post landed in water. Fix: a dry-land check (fluid at the surface is skipped).
+20. A garrison over its cap (old saves) kept gaining missing classes. Fix: `reinforce()` swaps a surplus raider for the missing class.
+21. In a JSON patch through a bash heredoc, `\\n` arrived as a real newline: write the patch scripts with the Write tool.
+Not verified: horn waking a sleeper and the bed refusal during a night raid (the dev client has no input to lie in a bed);
+miners tunnelling under obsidian (stairs-down logic only seen with sand); the demoman's proactive breach with a fresh report, on its own.
+
 ## Next step
-Install into the user's instance (ask first; the instance is missing ritchiesprojectilelib). Push the branch when asked.
+Install into the user's instance (ask first; the instance is missing ritchiesprojectilelib). Push the branch when asked. Next ideas: sleep-blocking check with a real player, tunnelling under obsidian.

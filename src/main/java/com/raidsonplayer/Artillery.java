@@ -139,18 +139,20 @@ final class Artillery {
         call(be, "setYaw", new Class<?>[]{float.class}, (float) Math.toDegrees(Math.atan2(-v.x, v.z)));
         call(be, "setPitch", new Class<?>[]{float.class}, (float) Math.toDegrees(Math.atan2(v.y, h)));
         spawnShell(level, muzzle, v);
+        markZone(level, target);
         boom(level, muzzle);
         return true;
     }
 
     /** 2-4 HE shells diving onto `target` from far out along `from` (the direction of the raider base). */
-    static void airstrike(ServerLevel level, Vec3 target, Vec3 from, int shells, RandomSource r) {
+    static void airstrike(ServerLevel level, Vec3 target, Vec3 from, int shells, double spread, RandomSource r) {
         Vec3 dir = new Vec3(from.x, 0, from.z).normalize();
         for (int i = 0; i < shells; i++) {
-            Vec3 aim = target.add(Mth.nextDouble(r, -7, 7), 0, Mth.nextDouble(r, -7, 7));
+            Vec3 aim = target.add(Mth.nextDouble(r, -spread, spread), 0, Mth.nextDouble(r, -spread, spread));
             Vec3 start = target.add(dir.scale(90)).add(Mth.nextDouble(r, -8, 8), 60, Mth.nextDouble(r, -8, 8));
             if (!level.isLoaded(BlockPos.containing(start))) start = target.add(dir.scale(40)).add(0, 60, 0);
             spawnShell(level, start, velocity(start, aim, 70 + 8 * i));
+            markZone(level, aim);
         }
     }
 
@@ -162,7 +164,22 @@ final class Artillery {
         e.setDeltaMovement(v);
         call(e, "setFuze", new Class<?>[]{ItemStack.class}, new ItemStack(BuiltInRegistries.ITEM.get(ResourceLocation.parse("createbigcannons:impact_fuze"))));
         call(e, "setOrientation", new Class<?>[]{Vec3.class}, v.normalize());
+        e.addTag(RAIDER_SHELL); // raiders mostly shrug off their own shells (RaiderEntity.hurt); player-fired shells hit them in full
         level.addFreshEntity(e);
+    }
+
+    static final String RAIDER_SHELL = "raidsonplayer_shell";
+
+    /** Where raider shells are about to land. CBC blast damage carries no shooter, so "our shell" is known by place and time. */
+    private record Zone(Vec3 at, long until) {}
+    private static final List<Zone> ZONES = new ArrayList<>();
+
+    static void markZone(ServerLevel level, Vec3 aim) { ZONES.add(new Zone(aim, level.getGameTime() + 300)); }
+
+    static boolean raiderFireAt(Level level, Vec3 pos) {
+        long t = level.getGameTime();
+        ZONES.removeIf(z -> z.until < t);
+        return ZONES.stream().anyMatch(z -> z.at.distanceToSqr(pos) < 16 * 16);
     }
 
     static void boom(ServerLevel level, Vec3 at) {

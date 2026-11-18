@@ -6,6 +6,7 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.LongTag;
 import net.minecraft.nbt.NbtUtils;
+import net.minecraft.nbt.StringTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.item.ItemStack;
@@ -15,13 +16,17 @@ import net.minecraft.world.phys.Vec3;
 import javax.annotation.Nullable;
 import java.util.*;
 
-/** World state: progression stage, player bases with their raider camps, and squads (raiders as data). */
+/** World state: progression stage, player bases with their raider camps, squads (raiders as data) and scout reports. */
 public class RaidData extends SavedData {
     public enum State { GARRISON, OUTBOUND, ATTACK, RETREAT }
+    /** RAID = day raid by the garrison; NIGHT = night raid squad; SCOUT: ATTACK means watching the base; PATROL: OUTBOUND to a waypoint. */
+    public enum Kind { GARRISON, RAID, NIGHT, PATROL, SCOUT }
 
     public int stage = 1;
     public final Map<UUID, Base> bases = new LinkedHashMap<>();
     public final Map<UUID, Squad> squads = new LinkedHashMap<>();
+    /** Player -> the base a scout last saw them at. A night raid whose scout was killed goes there. */
+    public final Map<UUID, UUID> lastScouted = new HashMap<>();
 
     public static class Base {
         public UUID id = UUID.randomUUID();
@@ -34,20 +39,34 @@ public class RaidData extends SavedData {
         @Nullable public BlockPos gate, gateCrank;
         public long nextRaid, lastSeen, lastRegen, nextPlaceTry, nextCannon;
         @Nullable public UUID garrison, raid;
+        // night raids
+        public long nextNight, nextStrike, nextPatrol;
+        public boolean nightPlanned, freshIntel, scoutSent;
+        public int strikes;
+        @Nullable public UUID scout, patrol;
     }
 
     public static class Squad {
         public UUID id = UUID.randomUUID();
         public UUID base;
+        public Kind kind = Kind.RAID;
         public State state;
         public Vec3 pos;
-        public int count, startCount, stolen;
-        public boolean airstrike;
+        /** Where OUTBOUND/ATTACK go: the base home, a scout's watch point or a patrol waypoint. Null = the base home. */
+        @Nullable public BlockPos target;
+        public final List<Role> roles = new ArrayList<>();
+        public int startCount, stolen;
+        public boolean airstrike, hadLeader, sawPlayer;
         public long stateSince, lastSteal;
         public final List<ItemStack> loot = new ArrayList<>();
         /** Entity UUIDs currently materialized. Not saved: raider entities are recreated from this data after a restart. */
         public final Set<UUID> live = new HashSet<>();
         public final Set<BlockPos> claimed = new HashSet<>();
+
+        public int count() { return roles.size(); }
+
+        /** Had a leader and lost him: the squad is shakier and no longer acts together. */
+        public boolean leaderless() { return hadLeader && !roles.contains(Role.LEADER); }
     }
 
     public static RaidData get(MinecraftServer server) {
@@ -82,6 +101,15 @@ public class RaidData extends SavedData {
             t.putLong("lastRegen", b.lastRegen);
             if (b.garrison != null) t.putUUID("garrison", b.garrison);
             if (b.raid != null) t.putUUID("raid", b.raid);
+            t.putLong("nextNight", b.nextNight);
+            t.putLong("nextStrike", b.nextStrike);
+            t.putLong("nextPatrol", b.nextPatrol);
+            t.putBoolean("nightPlanned", b.nightPlanned);
+            t.putBoolean("freshIntel", b.freshIntel);
+            t.putBoolean("scoutSent", b.scoutSent);
+            t.putInt("strikes", b.strikes);
+            if (b.scout != null) t.putUUID("scout", b.scout);
+            if (b.patrol != null) t.putUUID("patrol", b.patrol);
             bl.add(t);
         }
         tag.put("bases", bl);
@@ -90,14 +118,20 @@ public class RaidData extends SavedData {
             CompoundTag t = new CompoundTag();
             t.putUUID("id", s.id);
             t.putUUID("base", s.base);
+            t.putString("kind", s.kind.name());
             t.putString("state", s.state.name());
             t.putDouble("x", s.pos.x);
             t.putDouble("y", s.pos.y);
             t.putDouble("z", s.pos.z);
-            t.putInt("count", s.count);
+            if (s.target != null) t.putLong("target", s.target.asLong());
+            ListTag roles = new ListTag();
+            s.roles.forEach(r -> roles.add(StringTag.valueOf(r.name())));
+            t.put("roles", roles);
             t.putInt("startCount", s.startCount);
             t.putInt("stolen", s.stolen);
             t.putBoolean("airstrike", s.airstrike);
+            t.putBoolean("hadLeader", s.hadLeader);
+            t.putBoolean("sawPlayer", s.sawPlayer);
             t.putLong("stateSince", s.stateSince);
             ListTag loot = new ListTag();
             s.loot.stream().filter(i -> !i.isEmpty()).forEach(i -> loot.add(i.save(reg)));
@@ -105,6 +139,14 @@ public class RaidData extends SavedData {
             sl.add(t);
         }
         tag.put("squads", sl);
+        ListTag ls = new ListTag();
+        lastScouted.forEach((player, base) -> {
+            CompoundTag t = new CompoundTag();
+            t.putUUID("player", player);
+            t.putUUID("base", base);
+            ls.add(t);
+        });
+        tag.put("lastScouted", ls);
         return tag;
     }
 
@@ -129,6 +171,15 @@ public class RaidData extends SavedData {
             b.lastRegen = t.getLong("lastRegen");
             if (t.hasUUID("garrison")) b.garrison = t.getUUID("garrison");
             if (t.hasUUID("raid")) b.raid = t.getUUID("raid");
+            b.nextNight = t.getLong("nextNight");
+            b.nextStrike = t.getLong("nextStrike");
+            b.nextPatrol = t.getLong("nextPatrol");
+            b.nightPlanned = t.getBoolean("nightPlanned");
+            b.freshIntel = t.getBoolean("freshIntel");
+            b.scoutSent = t.getBoolean("scoutSent");
+            b.strikes = t.getInt("strikes");
+            if (t.hasUUID("scout")) b.scout = t.getUUID("scout");
+            if (t.hasUUID("patrol")) b.patrol = t.getUUID("patrol");
             d.bases.put(b.id, b);
         }
         for (Tag e : tag.getList("squads", Tag.TAG_COMPOUND)) {
@@ -137,14 +188,23 @@ public class RaidData extends SavedData {
             s.id = t.getUUID("id");
             s.base = t.getUUID("base");
             s.state = State.valueOf(t.getString("state"));
+            s.kind = t.contains("kind") ? Kind.valueOf(t.getString("kind")) : s.state == State.GARRISON ? Kind.GARRISON : Kind.RAID;
             s.pos = new Vec3(t.getDouble("x"), t.getDouble("y"), t.getDouble("z"));
-            s.count = t.getInt("count");
+            if (t.contains("target")) s.target = BlockPos.of(t.getLong("target"));
+            if (t.contains("roles")) for (Tag r : t.getList("roles", Tag.TAG_STRING)) s.roles.add(Role.valueOf(r.getAsString()));
+            else for (int i = 0; i < t.getInt("count"); i++) s.roles.add(Role.RAIDER); // saved before classes existed
             s.startCount = t.getInt("startCount");
             s.stolen = t.getInt("stolen");
             s.airstrike = t.getBoolean("airstrike");
+            s.hadLeader = t.getBoolean("hadLeader");
+            s.sawPlayer = t.getBoolean("sawPlayer");
             s.stateSince = t.getLong("stateSince");
             for (Tag i : t.getList("loot", Tag.TAG_COMPOUND)) ItemStack.parse(reg, i).ifPresent(s.loot::add);
             d.squads.put(s.id, s);
+        }
+        for (Tag e : tag.getList("lastScouted", Tag.TAG_COMPOUND)) {
+            CompoundTag t = (CompoundTag) e;
+            d.lastScouted.put(t.getUUID("player"), t.getUUID("base"));
         }
         return d;
     }

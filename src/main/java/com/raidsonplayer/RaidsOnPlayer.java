@@ -15,6 +15,7 @@ import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.monster.Pillager;
+import net.minecraft.world.entity.player.Player;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.common.Mod;
@@ -24,6 +25,8 @@ import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.entity.EntityAttributeCreationEvent;
 import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
 import net.neoforged.neoforge.event.entity.player.AdvancementEvent;
+import net.neoforged.neoforge.event.entity.player.CanContinueSleepingEvent;
+import net.neoforged.neoforge.event.entity.player.CanPlayerSleepEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import net.neoforged.neoforge.registries.DeferredHolder;
 import net.neoforged.neoforge.registries.DeferredRegister;
@@ -54,12 +57,26 @@ public class RaidsOnPlayer {
             if (e.getEntity() instanceof ServerPlayer p) RaidManager.updateStage(p.server, RaidData.get(p.server));
         });
         NeoForge.EVENT_BUS.addListener((LivingDeathEvent e) -> {
-            if (e.getEntity() instanceof RaiderEntity r) RaidManager.onDeath(r);
+            if (e.getEntity() instanceof RaiderEntity r) {
+                var src = e.getSource();
+                LOG.debug("Raider {} died: {} direct={} tags={} owner={}", r.role(), src.getMsgId(),
+                        src.getDirectEntity() == null ? null : src.getDirectEntity().getType().toShortString(),
+                        src.getDirectEntity() == null ? null : src.getDirectEntity().getTags(),
+                        src.getEntity() == null ? null : src.getEntity().getType().toShortString());
+                RaidManager.onDeath(r);
+            }
         });
         NeoForge.EVENT_BUS.addListener(RaidsOnPlayer::commands);
+        // No sleeping through a night raid: the horn wakes you, and the bed refuses you until it is over.
+        NeoForge.EVENT_BUS.addListener((CanPlayerSleepEvent e) -> {
+            if (e.getProblem() == null && RaidManager.nightRaidNear(e.getEntity())) e.setProblem(Player.BedSleepingProblem.NOT_SAFE);
+        });
+        NeoForge.EVENT_BUS.addListener((CanContinueSleepingEvent e) -> {
+            if (e.getEntity() instanceof ServerPlayer p && RaidManager.nightRaidNear(p)) e.setContinueSleeping(false);
+        });
     }
 
-    /** /rop info | stage <n> | raid | rebuild  (ops only; for server admins and testing) */
+    /** /rop info | stage | raid | rebuild | fire | gate | airstrike | night [launch] | scout | patrol  (ops only; for admins and testing) */
     static void commands(RegisterCommandsEvent e) {
         e.getDispatcher().register(Commands.literal("rop").requires(s -> s.hasPermission(2))
                 .then(Commands.literal("info").executes(c -> info(c.getSource())))
@@ -96,12 +113,43 @@ public class RaidsOnPlayer {
                     ServerPlayer p = c.getSource().getPlayerOrException();
                     Base b = RaidManager.baseOf(data(c.getSource()), p);
                     if (b == null || b.camp == null) { c.getSource().sendFailure(Component.literal("No camp yet.")); return 0; }
-                    Artillery.airstrike(p.serverLevel(), p.position(), net.minecraft.world.phys.Vec3.atCenterOf(b.camp).subtract(p.position()), 3, p.getRandom());
+                    Artillery.airstrike(p.serverLevel(), p.position(), net.minecraft.world.phys.Vec3.atCenterOf(b.camp).subtract(p.position()), 3, 7, p.getRandom());
                     return 1;
-                })));
+                }))
+                // night: plan a night raid (a scout comes by day, the raid at dusk); "night launch": launch it right now
+                .then(Commands.literal("night").executes(c -> withBase(c.getSource(), (level, d, b) -> {
+                    RaidManager.planNight(b);
+                    return "Night raid planned: a scout comes while you are home by day, the raid at dusk.";
+                })).then(Commands.literal("launch").executes(c -> withBase(c.getSource(), (level, d, b) -> {
+                    RaidManager.planNight(b);
+                    b.freshIntel = true; // as if the scout got away
+                    for (java.util.UUID m : b.members) d.lastScouted.put(m, b.id);
+                    RaidManager.launchNight(level, d, b, level.getGameTime());
+                    return "Night raid launched with a scout report (it falls back at dawn, so use it at night).";
+                }))))
+                .then(Commands.literal("scout").executes(c -> withBase(c.getSource(), (level, d, b) -> {
+                    RaidManager.planNight(b);
+                    RaidManager.sendScout(level, d, b, level.getGameTime());
+                    return "Scout sent to watch your base.";
+                })))
+                .then(Commands.literal("patrol").executes(c -> withBase(c.getSource(), (level, d, b) -> {
+                    if (b.patrol != null) return "A patrol is already out.";
+                    RaidManager.startPatrol(level, d, b, level.getGameTime());
+                    return "Patrol sent out.";
+                }))));
     }
 
     static RaidData data(CommandSourceStack s) { return RaidData.get(s.getServer()); }
+
+    interface BaseAction { String run(ServerLevel level, RaidData d, Base b); }
+
+    static int withBase(CommandSourceStack src, BaseAction a) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        Base b = RaidManager.baseOf(data(src), src.getPlayerOrException());
+        if (b == null || b.camp == null) { src.sendFailure(Component.literal("You have no raider camp yet (set a bed in the overworld).")); return 0; }
+        String msg = a.run(src.getServer().overworld(), data(src), b);
+        src.sendSuccess(() -> Component.literal(msg), false);
+        return 1;
+    }
 
     static int gate(CommandSourceStack src, boolean open) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         Base b = RaidManager.baseOf(data(src), src.getPlayerOrException());
@@ -117,10 +165,11 @@ public class RaidsOnPlayer {
         for (Base b : d.bases.values()) {
             sb.append("\n- home ").append(b.home.toShortString()).append(" members ").append(b.members.size())
                     .append(" camp ").append(b.camp == null ? "none" : b.camp.toShortString() + " (stage " + b.campStage + ")")
-                    .append(" next raid in ").append(Math.max(0, b.nextRaid - level.getGameTime()) / 1200).append(" min");
+                    .append(" next raid in ").append(Math.max(0, b.nextRaid - level.getGameTime()) / 1200).append(" min")
+                    .append(b.nightPlanned ? ", night raid planned" : "").append(b.freshIntel ? ", scouted" : "");
             for (Squad s : d.squads.values())
                 if (s.base.equals(b.id))
-                    sb.append("\n    ").append(s.state).append(" x").append(s.count).append(" at ")
+                    sb.append("\n    ").append(s.kind).append(' ').append(s.state).append(' ').append(s.roles).append(" at ")
                             .append((int) s.pos.x).append(' ').append((int) s.pos.y).append(' ').append((int) s.pos.z)
                             .append(s.live.isEmpty() ? " (virtual)" : " (" + s.live.size() + " spawned)")
                             .append(s.loot.isEmpty() ? "" : " carrying " + s.loot.size() + " stacks");

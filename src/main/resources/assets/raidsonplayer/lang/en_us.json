@@ -1,3 +1,9 @@
 {
-  "entity.raidsonplayer.raider": "Raider"
+  "entity.raidsonplayer.raider": "Raider",
+  "entity.raidsonplayer.miner": "Raider Miner",
+  "entity.raidsonplayer.leader": "Raider Leader",
+  "entity.raidsonplayer.artilleryman": "Raider Artilleryman",
+  "entity.raidsonplayer.demoman": "Raider Demoman",
+  "entity.raidsonplayer.scout": "Raider Scout",
+  "item.raidsonplayer.camp_map": "Raider Camp Map"
 }

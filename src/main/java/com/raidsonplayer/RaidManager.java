@@ -74,9 +74,170 @@ public final class RaidManager {
             updateStage(server, d);
             updateMembership(server, d, t);
         }
-        for (Base b : List.copyOf(d.bases.values())) tickBase(level, d, b, t);
+        for (Base b : List.copyOf(d.bases.values())) if (d.bases.containsKey(b.id)) tickBase(level, d, b, t); // a camp taken this tick is gone
         for (Squad s : List.copyOf(d.squads.values())) tickSquad(level, d, s, t);
+        if (t % 1200 == 0) tickHunts(level, d, t);
         d.setDirty();
+    }
+
+    // ---------------------------------------------------------------- territory
+
+    /** How far raider land reaches around each camp, by stage. Camps sit 100-300 from home, so from stage 3 your own home can fall inside. */
+    static final int[] TERRITORY = {0, 64, 96, 128, 160};
+    static final int HOLD_SECONDS = 60, CAMP_CORE = 16, REGROUP_DAYS = 3;
+    static final double HUNT_CHANCE = 0.1; // per minute for a player on raider land
+
+    /** The camp whose land `p` is on (the nearest within reach), or null. Empty camps keep their land until a player takes them. */
+    @Nullable static Base landOf(RaidData d, Vec3 p) {
+        Base best = null;
+        double bd = TERRITORY[d.stage];
+        for (Base b : d.bases.values())
+            if (b.camp != null && horizontalDist(p, Vec3.atCenterOf(b.camp)) < bd) { bd = horizontalDist(p, Vec3.atCenterOf(b.camp)); best = b; }
+        return best;
+    }
+
+    /** The player base a camp belongs to (itself for a first camp). */
+    static Base main(RaidData d, Base b) { return b.parent != null ? d.bases.getOrDefault(b.parent, b) : b; }
+
+    /** Root camps run night raids, scouts, patrols and expansion: the first camp, and the ones survivors build after losing it. */
+    static boolean isRoot(Base b) { return b.parent == null || b.root; }
+
+    /** Garrison dead and nobody out in the field: the camp stands empty (a retake squad on its way doesn't count). */
+    static boolean empty(RaidData d, Base b) {
+        Squad g = d.squads.get(b.garrison);
+        return (g == null || g.count() == 0)
+                && d.squads.values().stream().noneMatch(s -> s.base.equals(b.id) && s.kind != Kind.GARRISON && s.kind != Kind.RETAKE);
+    }
+
+    /** The nearest other manned camp of the same player base, or null. */
+    @Nullable static Base nearestCamp(RaidData d, Base b) {
+        Base main = main(d, b);
+        Vec3 c = Vec3.atCenterOf(b.camp);
+        return d.bases.values().stream().filter(o -> o != b && o.camp != null && main(d, o) == main && !empty(d, o))
+                .min(Comparator.comparingDouble(o -> horizontalDist(Vec3.atCenterOf(o.camp), c))).orElse(null);
+    }
+
+    /**
+     * An empty camp: a day later the raiders send a squad to man it again. A player who holds it 60 s with no raider
+     * there takes it for good. True if it was taken (the base may be gone).
+     */
+    static boolean tickEmpty(ServerLevel level, RaidData d, Base b, long t) {
+        if (!empty(d, b)) { b.emptySince = 0; b.hold = 0; return false; }
+        long pts = points(d, b);
+        if (b.emptySince == 0) {
+            b.emptySince = pts;
+            tell(level, b, "The raider camp to the " + direction(b.home, b.camp) + " stands empty! Hold it for " + HOLD_SECONDS
+                    + " seconds to take it before they come back.", ChatFormatting.GOLD);
+        }
+        if (pts - b.emptySince >= 24000 && d.squads.values().stream().noneMatch(s -> s.base.equals(b.id) && s.kind == Kind.RETAKE)) sendRetake(level, d, b, t);
+        Vec3 c = Vec3.atCenterOf(b.camp);
+        List<ServerPlayer> in = level.getPlayers(p -> !p.isSpectator() && p.isAlive() && horizontalDist(p.position(), c) < CAMP_CORE);
+        if (in.isEmpty() || friendsNear(level, c, CAMP_CORE)) { b.hold = 0; return false; }
+        b.hold++;
+        for (ServerPlayer p : in)
+            p.displayClientMessage(Component.literal("Taking the raider camp: " + b.hold + " / " + HOLD_SECONDS + " s").withStyle(ChatFormatting.GOLD), true);
+        if (b.hold < HOLD_SECONDS) return false;
+        takeCamp(level, d, b, in.get(0), t);
+        return true;
+    }
+
+    /** A squad from the nearest manned camp (none: survivors from out in the wild) marches in to man the empty camp again. */
+    static void sendRetake(ServerLevel level, RaidData d, Base b, long t) {
+        Base from = nearestCamp(d, b);
+        Vec3 c = Vec3.atBottomCenterOf(b.camp);
+        Vec3 start = from != null ? Vec3.atBottomCenterOf(from.camp) : c.add(c.subtract(Vec3.atCenterOf(b.home)).multiply(1, 0, 1).normalize().scale(96));
+        Squad s = newSquad(b, Kind.RETAKE, State.OUTBOUND, start, Composition.squad(d.stage, new Random(level.random.nextLong()), Config.demomanChance(d.stage)), t);
+        s.target = b.camp;
+        d.squads.put(s.id, s);
+        tell(level, b, s.count() + " raiders are marching to retake their empty camp to the " + direction(b.home, b.camp) + "!", ChatFormatting.RED);
+        RaidsOnPlayer.LOG.info("Retake squad {} from {} to the empty camp at {}", s.roles, from == null ? "the wild" : from.camp, b.camp);
+    }
+
+    static void tickRetake(ServerLevel level, RaidData d, Squad s, Base b) {
+        if (horizontalDist(s.pos, Vec3.atBottomCenterOf(b.camp)) >= 12) return;
+        tell(level, b, "The raiders have retaken their camp to the " + direction(b.home, b.camp) + ".", ChatFormatting.RED);
+        returnHome(level, d, s, b); // they become its garrison, which regrows from there
+    }
+
+    /**
+     * A player held an empty camp: its land is gone, the points its dead defenders earned the raiders are taken back,
+     * and their next camp comes a cycle later. The first camp's record is the player base, so only its camp goes; when
+     * no root camp is left, the survivors build new ones REGROUP_DAYS later.
+     */
+    static void takeCamp(ServerLevel level, RaidData d, Base b, ServerPlayer by, long t) {
+        Base main = main(d, b);
+        String where = direction(b.home, b.camp);
+        for (Squad s : d.squads.values()) // a retake squad still on the way turns on whoever is around, then goes to the nearest camp
+            if (s.base.equals(b.id) && s.kind == Kind.RETAKE) {
+                Base to = nearestCamp(d, b);
+                if (to != null) { s.base = to.id; s.kind = Kind.HUNT; s.stateSince = t; }
+            }
+        main.bonus = Math.max(0, main.bonus - b.killed);
+        long period = Config.EXPAND_DAYS.get() * 24000L;
+        for (Base r : d.bases.values()) if (main(d, r) == main && isRoot(r) && r.nextExpand > 0) r.nextExpand += period;
+        if (b == main) {
+            b.camp = null;
+            b.garrison = null;
+            b.chests.clear();
+            b.cannons.clear();
+            b.gate = b.gateCrank = null;
+            b.upgradeAt = b.emptySince = b.killed = 0;
+            b.hold = 0;
+        } else d.bases.remove(b.id);
+        boolean rootsLeft = main.camp != null || d.bases.values().stream().anyMatch(x -> main.id.equals(x.parent) && x.root);
+        String msg = "You took the raider camp to the " + where + "! Its land is yours now.";
+        if (isRoot(b) && !rootsLeft) {
+            main.regroupAt = points(d, main) + REGROUP_DAYS * 24000L;
+            msg += " That was their last stronghold, but some got away. They'll be back in a few days...";
+        } else if (b == main) main.regroupAt = Long.MAX_VALUE; // other root camps still stand
+        tell(level, main, msg, ChatFormatting.GREEN);
+        if (!main.members.contains(by.getUUID())) by.sendSystemMessage(Component.literal(msg).withStyle(ChatFormatting.GREEN));
+        RaidsOnPlayer.LOG.info("{} took the {} camp of base {} ({} root camps left)", by.getName().getString(), isRoot(b) ? "root" : "expansion", main.home, rootsLeft ? "some" : "no");
+    }
+
+    /** The survivors are back: the first camp is up again (placeCamp), and they put up a second root camp next to it. */
+    static void regroup(ServerLevel level, RaidData d, Base main, long t) {
+        main.regroupAt = 0;
+        if (camps(d, main) < Config.MAX_CAMPS.get()) {
+            Base x = expand(level, d, main, t);
+            x.root = true;
+            x.scoutSent = true; // no scout due yet, as for a new base
+        }
+        tell(level, main, "The raiders who got away have regrouped! A new camp stands to the " + direction(main.home, main.camp)
+                + ", and they're building more.", ChatFormatting.DARK_RED);
+    }
+
+    /** Once a minute each player on raider land may draw a hunting party from that camp (one per camp at a time). */
+    static void tickHunts(ServerLevel level, RaidData d, long t) {
+        for (ServerPlayer p : level.players()) {
+            if (p.isSpectator() || level.random.nextDouble() >= HUNT_CHANCE) continue;
+            Base b = landOf(d, p.position());
+            if (b != null && !empty(d, b) && d.squads.values().stream().noneMatch(s -> s.base.equals(b.id) && s.kind == Kind.HUNT)) startHunt(level, d, b, p, t);
+        }
+    }
+
+    static void startHunt(ServerLevel level, RaidData d, Base b, ServerPlayer p, long t) {
+        Squad s = newSquad(b, Kind.HUNT, State.OUTBOUND, Vec3.atBottomCenterOf(b.camp), Composition.patrol(new Random(level.random.nextLong())), t);
+        s.target = p.blockPosition();
+        d.squads.put(s.id, s);
+        setGate(level, b, true);
+        p.sendSystemMessage(Component.literal("You're on raider land. A hunting party set out from their camp to the "
+                + direction(p.blockPosition(), b.camp) + "!").withStyle(ChatFormatting.RED));
+        RaidsOnPlayer.LOG.info("Hunting party {} from {} after {}", s.roles, b.camp, p.getName().getString());
+    }
+
+    /** A hunting party follows the nearest player on (or just off) its camp's land; it goes home when there is none, when losing, or after 5 min. */
+    static void tickHunt(ServerLevel level, RaidData d, Squad s, Base b, boolean mat, long t) {
+        if (s.state == State.RETREAT) {
+            if (horizontalDist(s.pos, Vec3.atBottomCenterOf(b.camp)) < 12) returnHome(level, d, s, b);
+            return;
+        }
+        Vec3 c = Vec3.atCenterOf(b.camp);
+        ServerPlayer prey = level.players().stream()
+                .filter(p -> !p.isSpectator() && p.isAlive() && horizontalDist(p.position(), c) < TERRITORY[d.stage] + 32)
+                .min(Comparator.comparingDouble(p -> horizontalDist(p.position(), s.pos))).orElse(null);
+        if (prey == null || t - s.stateSince > 6000 || mat && losing(level, s)) enter(s, State.RETREAT, t);
+        else s.target = prey.blockPosition();
     }
 
     static long dayTime(Level level) { return level.getDayTime() % 24000; }
@@ -86,8 +247,7 @@ public final class RaidManager {
      * Day raids, camp expansion, garrison regrowth, the night raid cooldown and patrols all run on it.
      */
     static long points(RaidData d, Base b) {
-        Base main = b.parent != null ? d.bases.getOrDefault(b.parent, b) : b;
-        return d.clock + main.bonus;
+        return d.clock + main(d, b).bonus;
     }
 
     /**
@@ -164,14 +324,25 @@ public final class RaidManager {
         return (long) Mth.randomBetweenInclusive(level.random, min * 24000, max * 24000);
     }
 
+    /** Time to the next day raid: half as long for a home on raider land. */
+    static long raidInterval(ServerLevel level, RaidData d, Base b) {
+        return raidInterval(level) / (landOf(d, Vec3.atCenterOf(b.home)) != null ? 2 : 1);
+    }
+
     static void tickBase(ServerLevel level, RaidData d, Base b, long t) {
-        if (b.camp == null) {
-            if (t >= b.nextPlaceTry && !b.members.isEmpty()) placeCamp(level, d, b, t);
+        if (b.camp == null) { // a new base, or its first camp was taken
+            if (b.regroupAt == Long.MAX_VALUE || b.regroupAt > 0 && points(d, b) < b.regroupAt) return; // other roots stand / survivors not back yet
+            if (t >= b.nextPlaceTry && !b.members.isEmpty()) {
+                placeCamp(level, d, b, t);
+                if (b.camp != null && b.regroupAt > 0) regroup(level, d, b, t);
+            }
             return;
         }
         double seen = level.getServer().getPlayerList().getViewDistance() * 16.0;
         if (!level.getPlayers(p -> !p.isSpectator() && horizontalDist(p.position(), Vec3.atCenterOf(b.camp)) < seen).isEmpty()) b.lastSeen = t;
-        if (b.campStage != d.stage) { // they rebuild overnight: from the next morning on, once no player has seen the camp for 3 min
+        if (tickEmpty(level, d, b, t)) return; // a player took it
+        boolean empty = b.emptySince != 0;
+        if (b.campStage != d.stage && !empty) { // they rebuild overnight: from the next morning on, once no player has seen the camp for 3 min
             if (b.upgradeAt == 0) b.upgradeAt = d.clock + 24000 - dayTime(level);
             if (d.clock >= b.upgradeAt && b.raid == null && b.waves == 0 && nightSquads(d, b).isEmpty() && t - b.lastSeen >= SEEN_UNSEEN_TICKS
                     && campLoaded(level, b)) rebuild(level, d, b);
@@ -179,14 +350,14 @@ public final class RaidManager {
 
         Squad g = d.squads.get(b.garrison);
         long pts = points(d, b);
-        if (g != null && pts - b.lastRegen >= 24000) { // one raider per day's worth of points joins until the camp is at full strength
+        if (g != null && !empty && pts - b.lastRegen >= 24000) { // one raider per day's worth of points joins until the camp is at full strength
             b.lastRegen = pts;
             reinforce(g, d.stage, cap(b, d.stage), 1);
         }
         boolean night = night(level);
         if (g != null && b.raid == null && b.waves == 0 && !night && pts >= b.nextRaid && canRaid(g) && raidable(level, b)) {
             if (scouted(d, b) && level.random.nextDouble() < Config.FULL_DAY_CHANCE.get()) {
-                b.nextRaid = pts + raidInterval(level);
+                b.nextRaid = pts + raidInterval(level, d, b);
                 startFullRaid(level, d, b, t);
             } else startRaid(level, d, b, g, t);
         }
@@ -204,7 +375,7 @@ public final class RaidManager {
         }
 
         tickFullRaid(level, d, b, t);
-        if (b.parent != null) return; // expansion camps: garrison, day raids and cannons only
+        if (empty || !isRoot(b)) return; // expansion camps: garrison, day raids and cannons only
         tickNightPlan(level, d, b, t, night);
         tickNightRaid(level, d, b, t, night);
         tickPatrolRoll(level, d, b, t);
@@ -221,18 +392,19 @@ public final class RaidManager {
         if (b.nextExpand == 0) b.nextExpand = pts + days * 24000L;
         if (pts < b.nextExpand) return;
         b.nextExpand = pts + days * 24000L;
-        if (camps(d, b) < Config.MAX_CAMPS.get()) expand(level, d, b, t);
+        if (camps(d, main(d, b)) < Config.MAX_CAMPS.get()) expand(level, d, b, t);
     }
 
-    /** A new camp around `b`'s home; it is built on the next base tick (placeCamp, retried until a site is found). */
-    static void expand(ServerLevel level, RaidData d, Base b, long t) {
-        Base x = new Base();
-        x.parent = b.id;
-        x.home = b.home;
-        x.members.addAll(b.members);
+    /** A new camp around the home of `b`'s player base; it is built on the next base tick (placeCamp, retried until a site is found). */
+    static Base expand(ServerLevel level, RaidData d, Base b, long t) {
+        Base main = main(d, b), x = new Base();
+        x.parent = main.id;
+        x.home = main.home;
+        x.members.addAll(main.members);
         x.nextRaid = points(d, x) + raidInterval(level);
         x.lastRegen = points(d, x);
         d.bases.put(x.id, x);
+        return x;
     }
 
     static int camps(RaidData d, Base b) {
@@ -408,7 +580,7 @@ public final class RaidManager {
         d.squads.put(s.id, s);
         setGate(level, b, true);
         b.raid = s.id;
-        b.nextRaid = points(d, b) + raidInterval(level);
+        b.nextRaid = points(d, b) + raidInterval(level, d, b);
         tell(level, b, going.size() + " raiders set out from their camp to the " + direction(b.home, b.camp) + "!", ChatFormatting.RED);
         horn(level, b);
         RaidsOnPlayer.LOG.info("Raid of {} {} launched from {} at base {}", going.size(), going, b.camp, b.home);
@@ -483,7 +655,7 @@ public final class RaidManager {
     static void scoutReported(ServerLevel level, RaidData d, Base b, Squad sc) {
         sc.sawPlayer = false; // report once
         b.freshIntel = true;
-        for (UUID m : b.members) d.lastScouted.put(m, b.id);
+        for (UUID m : b.members) d.lastScouted.put(m, main(d, b).id); // the player base, whichever root camp sent him
         tell(level, b, "A raider scout got away. They know where your base is now...", ChatFormatting.GOLD);
         RaidsOnPlayer.LOG.info("Scout reported base {}", b.home);
     }
@@ -492,8 +664,8 @@ public final class RaidManager {
     static void launchNight(ServerLevel level, RaidData d, Base b, long t) {
         Base target = b;
         if (!b.freshIntel) {
-            target = b.members.stream().map(d.lastScouted::get).filter(Objects::nonNull).map(d.bases::get)
-                    .filter(x -> x != null && x.camp != null).findFirst().orElse(null);
+            target = b.members.stream().map(d.lastScouted::get).filter(Objects::nonNull).map(d.bases::get).filter(Objects::nonNull)
+                    .map(x -> x.home.equals(b.home) ? b : x).filter(x -> x.camp != null).findFirst().orElse(null); // this home: from this root camp
             if (target == null) {
                 b.nightPlanned = false;
                 tell(level, b, "The raiders don't know where you live. No night raid tonight.", ChatFormatting.GREEN);
@@ -714,9 +886,10 @@ public final class RaidManager {
         long pts = points(d, b);
         if (b.members.isEmpty() || pts < b.nextPatrol || dayTime(level) > 6000) return;
         b.nextPatrol = pts + 24000 - dayTime(level); // next morning
+        double watch = landOf(d, Vec3.atCenterOf(b.home)) != null ? 2 : 1; // a home on raider land is watched twice as closely
         // a scout looks in today (tickNightPlan sends him once someone is home); planned nights send their own
-        if (!b.nightPlanned && b.scout == null && level.random.nextDouble() < Config.SCOUT_CHANCE.get()) b.scoutSent = false;
-        if (b.patrol == null && level.random.nextDouble() < Config.PATROL_CHANCE.get()) startPatrol(level, d, b, t);
+        if (!b.nightPlanned && b.scout == null && level.random.nextDouble() < Config.SCOUT_CHANCE.get() * watch) b.scoutSent = false;
+        if (b.patrol == null && level.random.nextDouble() < Config.PATROL_CHANCE.get() * watch) startPatrol(level, d, b, t);
     }
 
     static void startPatrol(ServerLevel level, RaidData d, Base b, long t) {
@@ -781,6 +954,8 @@ public final class RaidManager {
             case GARRISON -> { }
             case SCOUT -> tickScout(level, d, s, b, mat, t);
             case PATROL -> tickPatrol(level, d, s, b, mat, t);
+            case HUNT -> tickHunt(level, d, s, b, mat, t);
+            case RETAKE -> tickRetake(level, d, s, b);
             default -> tickRaid(level, d, s, b, mat, t);
         }
     }
@@ -794,6 +969,10 @@ public final class RaidManager {
         if (s.id.equals(b.scout)) b.scout = null;
         if (s.id.equals(b.patrol)) b.patrol = null;
         if (s.kind == Kind.NIGHT) tell(level, b, nightSquads(d, b).isEmpty() ? "The last night raid squad is wiped out!" : "A night raid squad is wiped out!", ChatFormatting.GREEN);
+        if (s.kind == Kind.RETAKE && b.camp != null) {
+            b.emptySince = points(d, b); // they try again a day later
+            tell(level, b, "The raiders sent to retake their camp are wiped out!", ChatFormatting.GREEN);
+        }
     }
 
     static void tickRaid(ServerLevel level, RaidData d, Squad s, Base b, boolean mat, long t) {
@@ -1065,8 +1244,9 @@ public final class RaidManager {
         Base b = d.bases.get(s.base);
         if (b == null) return;
         if (byPlayer) { // revenge: every raider a player kills brings their next moves closer
-            Base main = b.parent != null ? d.bases.getOrDefault(b.parent, b) : b;
-            main.bonus += Config.KILL_POINTS.get() * (e.role() == Role.LEADER ? 3 : 1) * 1200L;
+            long gain = Config.KILL_POINTS.get() * (e.role() == Role.LEADER ? 3 : 1) * 1200L;
+            main(d, b).bonus += gain;
+            if (s.kind == Kind.GARRISON || s.kind == Kind.RETAKE) b.killed += gain; // taken back if a player takes this camp
         }
         if (s.kind == Kind.SCOUT) tell(sl, b, "You killed the raider scout before he could report back.", ChatFormatting.GREEN);
         else if (e.role() == Role.LEADER && s.kind != Kind.GARRISON && s.count() > 0)

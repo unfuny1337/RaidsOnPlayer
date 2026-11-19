@@ -21,10 +21,11 @@ public class RaidData extends SavedData {
     public enum State { GARRISON, OUTBOUND, ATTACK, RETREAT }
     /**
      * RAID = day raid by the garrison; NIGHT = night raid squad; FULL = a squad of a full-sized raid wave;
-     * SCOUT: ATTACK means watching the base; PATROL: OUTBOUND to a waypoint.
+     * SCOUT: ATTACK means watching the base; PATROL: OUTBOUND to a waypoint; HUNT: OUTBOUND after a player on the camp's land;
+     * RETAKE: OUTBOUND to its own empty camp, which it mans again on arrival.
      */
     public enum Kind {
-        GARRISON, RAID, NIGHT, PATROL, SCOUT, FULL;
+        GARRISON, RAID, NIGHT, PATROL, SCOUT, FULL, HUNT, RETAKE;
 
         /** Out to attack a player base. */
         public boolean assault() { return this == RAID || this == NIGHT || this == FULL; }
@@ -70,6 +71,16 @@ public class RaidData extends SavedData {
         public long bonus;
         /** Mornings in a row the night raid roll missed after the cooldown; each one raises the chance. */
         public int nightMisses;
+        // territory: a root camp (the first camp, or one the survivors built after losing it) runs night raids, scouts, patrols, expansion
+        public boolean root;
+        /** Raider points when the camp was found empty (0 = manned); a retake squad sets out a day later. */
+        public long emptySince;
+        /** First camp's record only: points at which the survivors build new root camps after the last one fell (MAX = wait for the others). */
+        public long regroupAt;
+        /** Raider points that kills of this camp's own defenders earned (taken back if a player takes the camp). */
+        public long killed;
+        /** Seconds a player has held this empty camp (not saved). */
+        public int hold;
     }
 
     public static class Squad {
@@ -147,6 +158,10 @@ public class RaidData extends SavedData {
             t.putLong("upgradeAt", b.upgradeAt);
             t.putLong("bonus", b.bonus);
             t.putInt("nightMisses", b.nightMisses);
+            t.putBoolean("root", b.root);
+            t.putLong("emptySince", b.emptySince);
+            t.putLong("regroupAt", b.regroupAt);
+            t.putLong("killed", b.killed);
             bl.add(t);
         }
         tag.put("bases", bl);
@@ -228,6 +243,10 @@ public class RaidData extends SavedData {
             b.upgradeAt = t.getLong("upgradeAt");
             b.bonus = t.getLong("bonus");
             b.nightMisses = t.getInt("nightMisses");
+            b.root = t.getBoolean("root");
+            b.emptySince = t.getLong("emptySince");
+            b.regroupAt = t.getLong("regroupAt");
+            b.killed = t.getLong("killed");
             d.bases.put(b.id, b);
         }
         for (Tag e : tag.getList("squads", Tag.TAG_COMPOUND)) {

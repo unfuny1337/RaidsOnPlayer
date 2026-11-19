@@ -83,7 +83,7 @@ public class RaidsOnPlayer {
         });
     }
 
-    /** /rop info | stage | raid | rebuild | fire | gate | airstrike | night [launch] | full | expand | scout | patrol  (ops only; for admins and testing) */
+    /** /rop info | stage | raid | rebuild | fire | gate | airstrike | night [launch] | full | expand | scout | patrol | hunt  (ops only; for admins and testing) */
     static void commands(RegisterCommandsEvent e) {
         e.getDispatcher().register(Commands.literal("rop").requires(s -> s.hasPermission(2))
                 .then(Commands.literal("info").executes(c -> info(c.getSource())))
@@ -153,7 +153,14 @@ public class RaidsOnPlayer {
                     if (b.patrol != null) return "A patrol is already out.";
                     RaidManager.startPatrol(level, d, b, level.getGameTime());
                     return "Patrol sent out.";
-                }))));
+                })))
+                .then(Commands.literal("hunt").executes(c -> { // a hunting party from the camp whose land you stand on, skipping the roll
+                    ServerPlayer p = c.getSource().getPlayerOrException();
+                    Base b = RaidManager.landOf(data(c.getSource()), p.position());
+                    if (b == null) { c.getSource().sendFailure(Component.literal("You're not on raider land.")); return 0; }
+                    RaidManager.startHunt(p.serverLevel(), data(c.getSource()), b, p, p.serverLevel().getGameTime());
+                    return 1;
+                })));
     }
 
     static RaidData data(CommandSourceStack s) { return RaidData.get(s.getServer()); }
@@ -180,8 +187,11 @@ public class RaidsOnPlayer {
         ServerLevel level = src.getServer().overworld();
         StringBuilder sb = new StringBuilder("Stage " + d.stage + ", raider day " + d.clock / 24000 + ", " + d.bases.size() + " base(s)");
         for (Base b : d.bases.values()) {
-            sb.append(b.parent != null ? "\n  + expansion camp of home " : "\n- home ").append(b.home.toShortString()).append(" members ").append(b.members.size())
+            long pts = RaidManager.points(d, b);
+            sb.append(b.parent != null ? (b.root ? "\n  + root camp of home " : "\n  + expansion camp of home ") : "\n- home ").append(b.home.toShortString()).append(" members ").append(b.members.size())
                     .append(" camp ").append(b.camp == null ? "none" : b.camp.toShortString() + " (stage " + b.campStage + ")")
+                    .append(b.emptySince != 0 ? ", EMPTY (retake in " + Math.max(0, b.emptySince + 24000 - pts) / 1200 + " pts, held " + b.hold + " s)" : "")
+                    .append(b.regroupAt == Long.MAX_VALUE ? ", camp taken (other roots stand)" : b.regroupAt > 0 ? ", survivors regroup in " + Math.max(0, b.regroupAt - pts) / 1200 + " pts" : "")
                     .append(" next raid in ").append(Math.max(0, b.nextRaid - RaidManager.points(d, b)) / 1200).append(" pts")
                     .append(b.parent == null ? ", kills +" + b.bonus / 1200 + " pts, next camp in " + Math.max(0, b.nextExpand - RaidManager.points(d, b)) / 1200
                             + " pts, night raid " + (RaidManager.points(d, b) < b.nextNight && b.nightMisses == 0

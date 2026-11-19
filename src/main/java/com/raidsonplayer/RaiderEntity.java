@@ -478,6 +478,10 @@ public class RaiderEntity extends Pillager {
         setRole(Role.of(tag.getInt("ropRole")));
     }
 
+    /** Vanilla lets a mob with a target path off drops of up to ~16 blocks; chasing a player down from a hilltop camp, raiders fell to their deaths. */
+    @Override
+    public int getMaxFallDistance() { return 3; }
+
     @Override
     protected void dropCustomDeathLoot(ServerLevel level, DamageSource source, boolean recentlyHit) {
         super.dropCustomDeathLoot(level, source, recentlyHit);

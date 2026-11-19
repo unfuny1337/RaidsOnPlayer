@@ -371,5 +371,44 @@ be dry); and each failed attempt adds slack (`Base.placeFails`, not saved): rise
 slack up to 4. Retries every 10 s for the first 4 failures, then 30 s. On their terrain the camp now comes on the 4th
 attempt (~1.5 min with 30 s retries; ~40 s with 10 s).
 
+## Territory (2026-11-19)
+Request: raider land around camps; on it you get attacked more, a home on it gets more scouting and raids; more camps =
+more land; a camp whose squad was killed can be taken, but if no player takes it the raiders come back for it; the root
+camp can be taken too, and then new root camps (more than one) appear after a few days and grow on their own.
+User chose: take a camp by holding it 60 s; my picks for the rest (land radius by stage, kill points taken back, expansion delay).
+Built (RaidManager unless noted):
+- Land = within `TERRITORY` {64, 96, 128, 160} by stage of any camp (`landOf`, computed, nothing saved). Empty camps keep
+  their land until taken. Camps sit 100-300 from home, so from stage 3 your own home can fall inside.
+- On their land: once a minute, 10% per player, the camp sends a hunting party (`Kind.HUNT`, the patrol make-up, one per camp)
+  that follows the nearest player within land + 32 and goes home when there is none, when losing, or after 5 min.
+- Home on their land: day raid interval halved (`raidInterval(level, d, b)`), scout and patrol chances doubled.
+- Empty camp (`empty`: garrison 0 and no squad of it in the field; a retake squad doesn't count): `Base.emptySince`
+  (points), no regrowth, no rebuild, no root duties. A day of points later a `Kind.RETAKE` squad (night-raid make-up)
+  marches from the nearest manned camp of the same home (none: from 96 blocks out) and becomes the garrison on arrival
+  (`returnHome`); wiped out, the next one comes a day later. A player within 16 of the centre with no raider there for 60 s
+  (action bar counter) takes it (`takeCamp`): the kill points its defenders earned (`Base.killed`, garrison/retake kills)
+  come off the bonus, every root's next expansion moves back a cycle, a retake squad still on the way turns into a hunt
+  from the nearest camp. An expansion camp's record is deleted (ruins and chests stay); the first camp's record is the
+  player base, so only its camp is cleared.
+- Roots: the first camp, plus `Base.root` expansions. Roots run night raids, scouts, patrols and expansion (expansions
+  always attach to the player base: `expand` uses `main()`). When the last root falls, `regroupAt` = 3 days of points
+  later: the first camp is placed again and a second root camp is added (`regroup`). While other roots stand,
+  a taken first camp waits (`regroupAt = MAX`). Scout reports are stored against the player base (`main`).
+- RaiderEntity: `getMaxFallDistance` = 3. Vanilla allows ~16 for a mob with a target; hunters chasing a player down from a
+  hilltop camp jumped off the cliff and died (seen in the first hunt test: 2 of 3 dead from falls, fire -1).
+- `/rop hunt` (a hunting party from the land you stand on); `/rop info` shows EMPTY/retake/hold, regroup and root camps.
+Verified in game (dev server + client, home 3019,70,3060, stage 3):
+1. `/rop hunt` 68 blocks from a camp: the party left the camp and reached the player. After the fall fix, two hunts from
+   hilltop camps (y 128 and 123) reached the player with no losses.
+2. Killed an expansion camp's garrison with the player inside: EMPTY, hold counted up, after 60 s "Dev took the expansion
+   camp", the camp left `/rop info`, next camp 32 -> 71 pts.
+3. Emptied another camp, player moved away, `/time add 24000`: a retake squad of 6 set out from the nearest camp, walked in
+   as data and became the garrison (regrowth resumed: a demoman joined).
+4. Took the root camp: "no root camps left", regroup in 60 pts; `/time add 72000`: the first camp was rebuilt at
+   2882,128,2865 (after two site retries) and a root camp at 2765,67,3037 a second later.
+Not verified: the kill-point refund (all test kills were /kill, which gives no points); hunts that keep going at a home
+on their land; a materialized retake squad fighting its way in; a retake squad turning into a hunt on takeover.
+Seen once, not chased: a garrison raider at 0.5 HP that died a moment later at the 2891,123,3277 camp (not a hunter).
+
 ## Next step
 Install into the user's instance (ask first; the instance is missing ritchiesprojectilelib). Push the branch when asked. Next ideas: sleep-blocking check with a real player, tunnelling under obsidian, a clean flank test on untouched ground.

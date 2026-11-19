@@ -38,3 +38,7 @@ and grow stronger as players progress (iron, diamonds + andesite alloy, brass).
     versionRange="[5.11,)"
     ordering="AFTER"
     side="BOTH"
+
+# Optional: shows raider land on Xaero's World Map and Minimap (mixins skip themselves when those mods are absent)
+[[mixins]]
+config="${mod_id}.mixins.json"

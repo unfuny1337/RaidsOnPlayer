@@ -410,5 +410,28 @@ Not verified: the kill-point refund (all test kills were /kill, which gives no p
 on their land; a materialized retake squad fighting its way in; a retake squad turning into a hunt on takeover.
 Seen once, not chased: a garrison raider at 0.5 HP that died a moment later at the 2891,123,3277 camp (not a hunter).
 
+## Raider land on Xaero's maps (2026-11-19)
+Request: "add xaero mini/world map support so you can actually see the territory".
+- Sync: `TerritoryPayload` (stage reach + every camp's x/z/empty) goes to all players when it changes (checked every 5 s
+  in `RaidManager.tick`) and to each player on login. `client/ClientTerritory` keeps it and answers the map queries
+  (common classes only, so the handler can name it on a dedicated server).
+- Xaero has no public highlighter API. Both mods build a `HighlighterRegistry` per session, register Open Parties and
+  Claims' highlighter and seal the list with `end()`. `mixin/WorldMapRegistryMixin` and `MinimapRegistryMixin` (@Pseudo,
+  `required: false`, client only) register ours at the head of `end()`, so without Xaero nothing loads. Compiled against
+  Xaero from the Modrinth maven (`compileOnly`, World Map 1.47.0, Minimap 26.6.0; XaeroLib ships inside both jars).
+- `client/xaero/WorldMapTerritory` / `MinimapTerritory` extend each mod's `ChunkHighlighter`: chunk centre within reach
+  of a camp; colours 0xBBGGRRAA (red, orange for an empty camp; fill alpha 0x50, outer border 0xD0, read from Xaero's
+  claims highlighter bytecode: [0] centre, [1-4] north/east/south/west edges); tooltip "Raider land". Only drawn over
+  explored map (`coveringOutsideDiscovered` false), overworld only. Both maps use 32x32-chunk regions.
+  Refresh on change: World Map `MapWorld.clearAllCachedHighlightHashes()` (region hash = the camps touching it), Minimap
+  `DimensionHighlighterHandler.requestRefresh()`. The World Map's own bridge to the minimap
+  (`SupportXaeroMinimap.registerMinimapHighlighters`) is empty in 1.47, so the minimap needs its own highlighter.
+- Dev client: both Xaero jars copied into `run-client/mods`.
+Verified in game (screenshots): the minimap shows "Raider land" under the coordinates; the world map tints the land red
+with a red line where it ends and shows the tooltip; killing a camp's garrison turned its land orange on the open map
+within the 5 s sync.
+Not verified: minimap colours up close (small window); a dedicated server without Xaero on some clients (should be
+fine: the mixins are client-only and skip without Xaero); the minimap alone without the World Map.
+
 ## Next step
 Install into the user's instance (ask first; the instance is missing ritchiesprojectilelib). Push the branch when asked. Next ideas: sleep-blocking check with a real player, tunnelling under obsidian, a clean flank test on untouched ground.

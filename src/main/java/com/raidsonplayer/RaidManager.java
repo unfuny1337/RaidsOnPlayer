@@ -40,6 +40,7 @@ import net.minecraft.world.level.saveddata.maps.MapItemSavedData;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
+import net.neoforged.neoforge.network.PacketDistributor;
 
 import javax.annotation.Nullable;
 import java.util.*;
@@ -73,6 +74,11 @@ public final class RaidManager {
         if (t % 100 == 0) {
             updateStage(server, d);
             updateMembership(server, d, t);
+            TerritoryPayload land = territory(d);
+            if (!land.equals(lastSentLand)) { // map mods on the clients redraw raider land
+                lastSentLand = land;
+                PacketDistributor.sendToAllPlayers(land);
+            }
         }
         for (Base b : List.copyOf(d.bases.values())) if (d.bases.containsKey(b.id)) tickBase(level, d, b, t); // a camp taken this tick is gone
         for (Squad s : List.copyOf(d.squads.values())) tickSquad(level, d, s, t);
@@ -94,6 +100,14 @@ public final class RaidManager {
         for (Base b : d.bases.values())
             if (b.camp != null && horizontalDist(p, Vec3.atCenterOf(b.camp)) < bd) { bd = horizontalDist(p, Vec3.atCenterOf(b.camp)); best = b; }
         return best;
+    }
+
+    @Nullable static TerritoryPayload lastSentLand;
+
+    /** Raider land as the clients' maps draw it: every camp (empty ones marked) and the stage's reach. */
+    static TerritoryPayload territory(RaidData d) {
+        return new TerritoryPayload(TERRITORY[d.stage], d.bases.values().stream().filter(b -> b.camp != null)
+                .map(b -> new TerritoryPayload.Camp(b.camp.getX(), b.camp.getZ(), b.emptySince != 0)).toList());
     }
 
     /** The player base a camp belongs to (itself for a first camp). */

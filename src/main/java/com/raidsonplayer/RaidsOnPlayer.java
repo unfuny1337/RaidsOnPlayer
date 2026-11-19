@@ -28,6 +28,10 @@ import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
 import net.neoforged.neoforge.event.entity.player.AdvancementEvent;
 import net.neoforged.neoforge.event.entity.player.CanContinueSleepingEvent;
 import net.neoforged.neoforge.event.entity.player.CanPlayerSleepEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+import net.neoforged.neoforge.network.PacketDistributor;
+import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
+import com.raidsonplayer.client.ClientTerritory;
 import net.neoforged.neoforge.event.level.ExplosionEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import net.neoforged.neoforge.registries.DeferredHolder;
@@ -50,6 +54,12 @@ public class RaidsOnPlayer {
         modBus.addListener((EntityAttributeCreationEvent e) -> e.put(RAIDER.get(), Pillager.createAttributes()
                 .add(Attributes.MAX_HEALTH, 20.0).add(Attributes.ATTACK_DAMAGE, 1.0).build()));
         container.registerConfig(ModConfig.Type.COMMON, Config.SPEC);
+        // Raider land for map mods (Xaero's World Map / Minimap): sent on login and whenever it changes
+        modBus.addListener((RegisterPayloadHandlersEvent e) -> e.registrar("1")
+                .playToClient(TerritoryPayload.TYPE, TerritoryPayload.CODEC, (p, ctx) -> ClientTerritory.set(p)));
+        NeoForge.EVENT_BUS.addListener((PlayerEvent.PlayerLoggedInEvent e) -> {
+            if (e.getEntity() instanceof ServerPlayer p) PacketDistributor.sendToPlayer(p, RaidManager.territory(RaidData.get(p.server)));
+        });
 
         NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post e) -> {
             Cranks.tick();

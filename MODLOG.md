@@ -433,5 +433,15 @@ within the 5 s sync.
 Not verified: minimap colours up close (small window); a dedicated server without Xaero on some clients (should be
 fine: the mixins are client-only and skip without Xaero); the minimap alone without the World Map.
 
+## Expansion camps grow next to each other (2026-11-19)
+Request: "expansion camps should be closer to each other so there's no empty land between two camps".
+`placeCamp`: an expansion camp now picks a random camp of the same base and samples CAMP_SPACING (72) to 1.6x the
+stage's reach from it (+0.1x per failed attempt, up to 2x, where the two lands would only touch), still within
+baseDistanceMin-Max of the home ("off the ring" otherwise). The first camp, or an expansion with no camp to grow from,
+still goes anywhere on the ring. Camps already standing don't move.
+Verified: 6 days of `/time add` on home 3019,70,3060 (stage 3, reach 128) built 4 camps, each 72-190 blocks from an
+existing camp (lands overlap below 256). "off the ring" was the most common rejection (7-9 of 12), so a site took 1-2
+extra 10 s retries.
+
 ## Next step
 Install into the user's instance (ask first; the instance is missing ritchiesprojectilelib). Push the branch when asked. Next ideas: sleep-blocking check with a real player, tunnelling under obsidian, a clean flank test on untouched ground.

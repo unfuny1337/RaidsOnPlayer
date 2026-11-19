@@ -475,13 +475,23 @@ public final class RaidManager {
     static void placeCamp(ServerLevel level, RaidData d, Base b, long t) {
         int min = Config.CAMP_MIN_DIST.get(), max = Math.max(min, Config.CAMP_MAX_DIST.get());
         Map<String, Integer> why = new TreeMap<>();
+        int slack = Math.min(b.placeFails, 4); // rough land: a bit less picky each time
+        // An expansion grows next to a camp of the same base, close enough that their land overlaps (no gap between them);
+        // the first camp, or one with no camp to grow from, goes anywhere on the ring around the home.
+        List<BlockPos> next = b.parent == null ? List.of() : d.bases.values().stream()
+                .filter(o -> o != b && o.camp != null && main(d, o) == main(d, b)).map(o -> o.camp).toList();
+        double link = TERRITORY[d.stage] * (1.6 + 0.1 * slack); // 2x reach would only touch
         for (int i = 0; i < 12; i++) {
-            double a = level.random.nextDouble() * Math.PI * 2, r = Mth.nextDouble(level.random, min, max);
-            int x = b.home.getX() + (int) (Math.cos(a) * r), z = b.home.getZ() + (int) (Math.sin(a) * r);
+            double a = level.random.nextDouble() * Math.PI * 2;
+            BlockPos from = next.isEmpty() ? b.home : next.get(level.random.nextInt(next.size()));
+            double r = next.isEmpty() ? Mth.nextDouble(level.random, min, max) : Mth.nextDouble(level.random, CAMP_SPACING, Math.max(CAMP_SPACING, link));
+            int x = from.getX() + (int) (Math.cos(a) * r), z = from.getZ() + (int) (Math.sin(a) * r);
+            double fromHome = Math.sqrt(b.home.distToCenterSqr(x, b.home.getY(), z));
+            if (!next.isEmpty() && (fromHome < min || fromHome > max)) { why.merge("off the ring", 1, Integer::sum); continue; }
             // not near another player's home (its own home is skipped: rounding puts a site at exactly `min` just inside it)
             if (d.bases.values().stream().anyMatch(o -> o != b && !o.home.equals(b.home) && o.home.distToCenterSqr(x, o.home.getY(), z) < (double) min * min)) { why.merge("near a home", 1, Integer::sum); continue; }
             if (d.bases.values().stream().anyMatch(o -> o.camp != null && o.camp.distToCenterSqr(x, o.camp.getY(), z) < CAMP_SPACING * CAMP_SPACING)) { why.merge("near a camp", 1, Integer::sum); continue; }
-            BlockPos c = CampBuilder.trySite(level, x, z, Math.min(b.placeFails, 4), why); // rough land: a bit less picky each time
+            BlockPos c = CampBuilder.trySite(level, x, z, slack, why);
             if (c == null) continue;
             b.camp = c;
             apply(b, CampBuilder.build(level, c, d.stage, 0, facing(c, b.home), b.parent != null, level.random), d.stage);

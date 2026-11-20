@@ -443,5 +443,179 @@ Verified: 6 days of `/time add` on home 3019,70,3060 (stage 3, reach 128) built 
 existing camp (lands overlap below 256). "off the ring" was the most common rejection (7-9 of 12), so a site took 1-2
 extra 10 s retries.
 
+## Raider airships and the pilot (2026-11-19, version 1.2.0; 1.2.1 holds new ships still until warm; 1.2.2 shells; 1.2.3 plot 0)
+Request: raiders fly the user's airship (`airship_mk2.excraft`, made with the Create Aeronautics Toolgun addon); link
+signals randomized per ship with the typewriter bindings matching; new class "pilot" (tier 3: read as stage 3+),
+aviator's goggles, a bow, full-sized raids only, drops the 2 armed HE shells on the base and leaves. Mid-way: "shells are
+already armed and will explode on impact" and "would be more chaotic if airship lost control if pilot died/fell".
+The ship (decoded from the blueprint, `src/main/resources/data/raidsonplayer/airships/airship_mk2.excraft`): 5 Sable
+sub-levels: hull with balloon, adjustable burner, creative motor, two propeller bearings, sail rudder, seat; and two
+bomb rigs (oak beam, rope, impact-fuzed HE shell) held under the hull by two Create stickers. Controls:
+- Throttle lever 1 -> link -> two `simulated:analog_transmission` in front of the propellers. They BRAKE:
+  speed = 1 - (signal + 1) / 16, so signal 0 is full power and 15 stops them (the blueprint was saved parked at 15).
+- Throttle lever 2 -> link -> burner (0-15 heat).
+- Linked typewriter: D/A -> directional gearshift -> torsion spring -> sail rudder (only bites at speed; NOT
+  differential thrust, both propellers always run together); F -> both stickers -> the bomb rigs drop.
+Built (`Airships`, all reflection; optional, needs `aeronautics` + `create_aeronautics_toolgun`):
+- Blueprint NBT rewritten per ship: every frequency pair (`FrequencyFirst/Last` on links, `FirstItem/SecondItem` on
+  typewriter keys) maps to a fresh pair of random items, the same everywhere in that ship. The creative motor goes
+  16 -> 64 rpm (16 rpm = 1.2 blocks/s, too slow for the rudder; 64 = ~5.5 blocks/s).
+- Placed with the Toolgun's `PortableStructurePrinterPlacement.placeBlueprint` (package-private, no player needed). New
+  sub-levels = the diff of Sable's list before/after. Controls found by scanning the plot chunks' block entities:
+  `LinkedTypewriterBlockEntity`; the two `ThrottleLeverBlockEntity` told apart by the link next to each (diagonally
+  below) carrying the remapped burner frequency; the seat by block id. Pilot: `RaidManager.equip(PILOT)` + Create
+  `SeatBlock.sitDown`. Driven with the mods' public methods: `ThrottleLeverBlockEntity.setSignal`,
+  `LinkedTypewriterBlockEntity.pressKey/releaseKey`.
+- Sable gotcha 29: on a dedicated server ANY Java reflection on `SubLevelContainer` (even `getMethod` with exact types)
+  lists all its methods and loads its `getContainer(ClientLevel)` overload -> "invalid dist DEDICATED_SERVER". The
+  container calls go through `MethodHandles` (`findStatic/findVirtual`), which bind one method only.
+- Gotcha 30: a freshly placed balloon is cold and can't carry the ship until the burner has heated it, and how long
+  that takes varies: dropped from y 300 the ship settled at ~y 124 on the dev server, but in the user's singleplayer
+  world it fell 226 blocks to the ground and its armed shells went off there (their debug.log, 2026-11-19 16:10; the
+  blast also spilled the camp's lava moat). Fix (`steady`): the ship appears CRUISE + 10 above the highest ground on
+  its way in and is held still: every tick each part's linear and angular velocity is cancelled through Sable's
+  `RigidBodyHandle` (`of`, `getLinearVelocity`, `addLinearAndAngularVelocity`). How much the hull sank since the last
+  tick is the lift test (-0.56 blocks/s = full gravity); a second under 0.05 and it is let go. 90 s without that: the
+  ship is removed instead. Aeronautics also thins the air with height (warm ceiling ~y 150): no airship when the
+  approach ground + 40 is above it.
+- The blueprint always comes out nose south and the rudder turns it only slowly, so the ship appears 140 blocks NORTH
+  of the target, flies straight over it and keeps going south. Altitude: burner = 8 + 0.5 x height error - 4 x climb
+  rate, cruise 30 above the highest ground 16 ahead. Heading: rudder key on turn error minus 1.5 s of yaw rate.
+- Bombs: aim from `strikeAim` (a defender of the raided base, clear of raiders; around the target itself for
+  `/rop airship`); F when within 10 of the aim or within 20 having just passed it, and no raider within BLAST of it
+  (pilots don't count: `friendsNear` skips them). `Artillery.markZone` there. The bomb rigs then leave the ship's part
+  list. Leaves when 160 from every player (or 3 min).
+- 1.2.2, shells: in the user's singleplayer game (1.2.1 installed) the shells still went off the moment the ship was
+  placed: their debug.log showed the hold's lift stalling at -0.138 (a holed balloon) where every dev run reached
+  -0.04. Not reproduced on the dev server, even with a copy of their world (`New World (5)`), the same full raid
+  (`/rop full 5`) and their server-side mods (Lithium, ModernFix, FerriteCore, ...): 2 shells all the way. So the
+  blueprint's shells are disarmed (`disarm`: the `Fuze` tag comes off every `createbigcannons:fuzed_block`) and never
+  armed as blocks: on the drop the pilot still presses F, and `release` swaps the bomb rigs for impact-fuzed HE shell
+  projectiles (`Artillery.spawnShell`) at each shell's spot with the ship's speed, removing the rigs.
+- Gotcha 31: with the pilot killed, the falling ship hung the dev server until the watchdog killed it: Sable's
+  `FragileBlockCallback` broke a block inside `Rapier3D.step`, the neighbour updates changed another block, and
+  `handleBlockChange` called back into native Rapier (`newVoxelCollider`) mid-step (crash report says "make sure this
+  is not caused by Sable"). So no raider ship part ever comes down on the ground as a physics body: the drop uses
+  projectiles (above), and an out-of-control ship (phase FALLING: rudder jammed, propellers on, burner off) is
+  watched every tick and blows up (`release` + explosion 4, parts removed) 14 blocks above the ground or after 60 s.
+- 1.2.3, plot 0 (gotcha 32): in the user's fresh world the ship spawned fine but hung in place, spinning. Every
+  printed ship gets the Create gear network of the blueprint's own plot (the user built it in plot 0: absolute
+  coordinates 20480000+), with the creative motor driven instead of driving. In any other plot that sorts itself out
+  when the Toolgun applies the motor's saved 64 rpm a few ticks after placing it (default 16). But the first ship in
+  a world lands in plot 0 itself, where the network is named after the motor's own position, so Create took the speed
+  change for a gear loop and broke the motor on tick 3. Nothing turned (every kinetic part `!OS`, the motor gone).
+  That ship also got shoved ~11 blocks and 27 degrees while held. Reproduced with a copy of their world: the first
+  ship after every restart (the cleanup freed plot 0), never later ones. Fix: `homePlot` (the motor's `network` ==
+  its own position) prints a copy 48 blocks south, then removes the first. A copy on the same spot read ~0 sink all
+  through the hold (something left of the first held it up), was judged warm at 4 s and fell or got shoved 20
+  blocks. The lift test also waits 200 ticks now (warm-up took 13-15 s every time).
+- `RaidData.airships`: parts under a pilot's control, removed on the next start (pilots are not saved: a loaded pilot
+  is `stale` and discarded). Full-sized raids at stage 3+: an airship with the final wave. `/rop airship` (at you).
+Verified on the dev server + client (stage 3): the flight log tuned over ~15 launches; 1.2.2 in the copy of the
+user's world: full raid at wave 5 -> airship held 13 s, "dropped 2 shells" over the home, crater and smoke there in a
+screenshot; pilot killed -> "Out-of-control airship blew up at 8,90,-68 (2 shells)", server fine. 1.2.1: held at y 125 for 13 s
+while the sink went -0.56 -> -0.04 per tick, then cruised at ~122, dropped 6-10 blocks from its aim (explosion smoke on the target in a screenshot), flew off
+and was removed; killing the pilot gave "out of control" and the ship came down and blew up by a village (smoke seen);
+leftover ships removed after a restart ("Removed 5 parts"); the terrain check refused the base home here (a y 126-140
+hill north of it).
+1.2.3: the first ship after a restart in a copy of the user's new world: "came out in its blueprint's own plot;
+flying a copy instead", sink -0.56 -> -0.05 over 15 s, flew straight (nose 88-94) and "dropped 2 shells" onto the
+home. Then in a brand-new dev world (stage 4, bed, camp built, `/rop full 5`): copy printed, warm after 12 s,
+"dropped 2 shells at -4,105,11 onto -11,70,17" (bed at -7,70,21).
+`/rop full [wave]` starts a full-sized raid at that wave (checked against the stage's wave count): `/rop full 4` at
+stage 3 sent the final wave (3 squads, 18 raiders) and its airship hook ran (refused here by the terrain check).
+Not verified: a pilot shot down with a bow from the ground; the pilot falling out by other means; the dedicated server without
+Aeronautics installed (all calls are guarded by `Airships.available()`).
+
+## Rings, lines, airstrikes on the base (2026-11-19, version 1.3.0)
+- Two or more squads sent at once (`sendOut`: full-raid waves, night raids) close a ring: each takes its own side, up
+  to 120 degrees either way from the camp's direction (3 squads: camp side and +-120), heads for a rally point
+  `RALLY` = 56 blocks out (`Squad.rally`; `dest` returns it until `go`) and waits. `surround`: when every squad
+  still on its way is in place (or one has waited 60 s, or a squad has marched 3 min) all get `go`, chat names the
+  sides, and at stage 3+ against a scouted base `callStrike` fires on the base as they go in. Their target is 4
+  blocks out from the home on their own side. Squads beaten on the road drop out of the ring. A single squad goes
+  straight in as before.
+- Lines: a follower's march goal is his place in the leader's line (`MarchGoal.slot`): abreast of him at 2.5-block
+  spacing across the way they go, facing the base once the leader halts (within 8 of where he's headed),
+  artillerymen 5 behind. Followers repath every 15 ticks (the slot moves with him).
+- Artillerymen: their post (`WatchGoal.post`) is on their squad's side of the base (its rally point, else the camp),
+  22 blocks out, and 8 behind the rally point while the ring closes.
+- Airstrikes aim at the base: `strikeAim` takes the home area (no more players near home or the player the
+  artilleryman sees). The airship's bombs use the same aim. `RaiderEntity.spotted` is gone.
+Verified (dev server + client, fresh world, stage 4, bed, camp, `/rop full 5`, 3 squads), 4 runs: "FULL squad in place" at
+39,-19 / 20,76 / -53,12 (NE, S, W of the home at 2,23), then "Ring of 3 squads closed ... all in place: true". While
+waiting, the NE squad's positions: the leader at the rally and 5 men within ~1 block of one line 15 blocks wide,
+facing the home; both artillerymen 9 and 14 blocks behind it.
+Not verified: the strike when the ring closes (needs a scouted base; two scouts left without a report here, one
+at nightfall); a squad stuck on its way (the 60 s / 3 min release); lines in forests and on rough ground.
+
+## Airships come from the raider camp, farther out (2026-11-20, version 1.4.0)
+- `Airships.launch`: the ship appears `START` = 200 blocks (was 140, always north) from its target on the line from
+  the raider camp, turned to face along it (`turn`: every part teleported through Sable's `RigidBodyHandle.teleport`
+  to its pose turned about a vertical axis through the hull, in the same tick, so ropes and stickers hold), and
+  flies on past the target the same way (`away`). The plot-0 copy moves 48 blocks along the line toward the target.
+  Chat names the camp's side ("from the south-east").
+- The far end of the track can be past the players' loaded chunks (the user plays at render and simulation
+  distance 12, about 192 blocks): launch loads the track's chunks (`getChunk`) before the terrain check, and
+  every second each ship refreshes a `RAID_TICKET` (distance 4: 5x5 chunks entity-ticking) around its hull.
+Verified (fresh world, stage 4, camp 136,220 south-east of the home 5,15, `/rop full 5`): launched on the camp line
+(plot-0 copy, 147 out), nose -122 wanted / -122 after `turn` / -123 held through warm-up, warm after 13 s,
+"dropped 2 shells ... onto 7,69,14". In the first session's ships the nose sat 8-11 degrees off by the first flight log
+line, not seen again in the next session (2 launches, logged every 4 ticks); the pilot steered it out either way.
+Not verified: a camp straight north/west (any angle is the same code path); a 200-block spawn where the track's far
+chunks had never been generated (sync generation on the launch tick may hitch).
+
+## Shells and chunk loading (2026-11-20, no change)
+- Asked: make cannon and airstrike shells load chunks around themselves. Not needed: CBC's required library
+  Ritchie's Projectile Library already keeps chunks loaded around its shells. Test: Dev 40 blocks behind the camp,
+  `/rop fire` at a home 237 blocks off (277 from Dev, past view distance 10): with a per-tick region ticket around each
+  raider shell, 3 shells burst at the home; with the ticket disabled, the 1 shell fired also burst at the home. Reverted.
+- Follow-up ("shells stopped flying if you flew far enough"): airstrike on the player, who teleports 120 blocks
+  away (simulation distance 5) or 300 (past view distance) at once; every shell logged each second (height above the
+  heightmap, speed, entity-ticking). 6 runs, 80 samples, no extra chunk loading: none stopped in mid-air. Every one flew
+  on and burst, or came to rest on a surface (the "stuck" ones: CBC's 33% impact-fuze dud, lying in the ground until
+  CBC discards it 400 ticks later). One sample right after a teleport showed its chunk not entity-ticking; a second
+  later the shell had moved 25 blocks on.
+
+## Nemesis leaders and tribute (2026-11-20, version 1.5.0)
+Request: "make first and second idea" from a list of fun ideas: (1) a leader who kills you or gets away earns a name,
+comes back with better gear and taunts you, drops his banner and loot when killed; (2) pay tribute at the camp's gate to
+put the next raid off, refuse too often and the raid is bigger. (Idea 4, boarding a raider airship, waits until the user
+builds a new airship for it.)
+- Nemesis (one per player base, on its record: `Base.nemesis/nemesisRank/nemesisKills`): `nemesisWon` when an assault
+  squad comes home with its leader after a fight (lost men or stole something) or any non-garrison squad kills a player
+  (`onPlayerKilled`, from LivingDeathEvent). No nemesis yet: that squad's leader becomes it (random name). Else his own
+  squad ranks him up, one rank per outing (`Squad.ranked`: a patrol spawn-camping the dev player took him from nothing to
+  rank 3 in 10 s before that). Titles by rank: Name, Name the Scarred, Name the Dreaded, Warlord Name.
+  `RaiderEntity.makeNemesis`: purple name tag, 20 + 10/rank health, Sharpness = rank, diamond chestplate with
+  Protection rank-1 from rank 2, banner drop chance 2 (always). Killed by a player: also the camp map (always) and
+  4 x rank emeralds; the record is cleared and the next leader to win takes his place.
+- He never sits in a garrison: `claimNemesis` puts him at the head of the next assault on his player base (day raid,
+  night raid, full-raid wave; a leader is added if the squad has none) unless he is out already, with a taunt in chat
+  (escape or kill lines). Coming home, he is discarded instead of joining the garrison and `Squad.nemesis` goes with
+  the squad, so he is free for the next raid. A squad lost with him (camp taken) leaves the record: he comes back anyway.
+- Tribute (stage 2+, camps with a gate): a day before a camp's day raid it demands `DEMAND` = 12/24/48 iron's worth
+  (iron 1, gold 2, emerald 3, diamond 8, blocks 9x) and the raid waits at least half a day. The first open demand of a
+  player base explains the rules, the others are one line. Thrown valuables (ItemEntity with a player thrower) within 6
+  of the watchman's spot outside the gate are taken every second; paid in full the raid is put off a whole raid interval
+  and refusals reset. While a demand is open the garrison does not target a player holding tribute in the main hand
+  (`parley`) unless he comes within 4 of a camp chest or hits them; no hunting party for him either.
+- Refusal (`refuse`): a day raid that sets out unpaid adds 2 x refusals raiders (max 6, they don't come out of the
+  garrison); the third refusal in a row makes it a full-sized raid when the base is scouted.
+- `/rop nemesis` (name one / rank him up), `/rop tribute` (your camp demands now); `/rop info` shows both.
+Verified (dev server + client, old test world, stage 3, base 3019,70,3060 with 8 camps): coming home made 5 camps demand
+at once (the long text 5 times, hence the one-line rule, seen working after the restart); 2 diamonds -> "16 of 24", 3
+emeralds -> "Tribute paid", next raid 37 -> 69 pts; an unthrown iron ingot was left lying. Survival Dev with emeralds in
+hand 8 blocks from the watchman, 11 raiders around: full health for 25 s; with a stone sword: killed in under 12 s.
+Unpaid raids: "2 more of them" (11 marched), "4 more" (14), then "Three times you refused ..." and a full raid. The patrol
+at home killed the respawning Dev 3 times: "has a name: Tarvek", "Tarvek the Scarred killed you", "Tarvek the Dreaded"
+(health 50, Sharpness 3, Protection 2 chestplate, head drop 2.0); damage by Dev killed him: "You killed Warlord Tarvek!",
+banner, camp map and 12 emeralds on the ground. `/rop nemesis` -> Orsik; wave 2 of a full raid: `Orsik is coming for you:
+"Last time I ran. This time you will."`, he spawned with 30 health and Sharpness 1; 3 of his 6 killed by Dev, Dev
+teleported away, the squad marched home: "Orsik the Scarred got away again" (rank 2).
+Not verified: a night raid led by the nemesis (same `sendOut` path as the full-raid wave); tribute thrown by a real
+player with Q (tested with summoned items carrying Dev's UUID as thrower); parley against a real player looting.
+Known: with many camps on independent timers, refusals stack up fast (three unpaid camps in a row = a full raid).
+
 ## Next step
-Install into the user's instance (ask first; the instance is missing ritchiesprojectilelib). Push the branch when asked. Next ideas: sleep-blocking check with a real player, tunnelling under obsidian, a clean flank test on untouched ground.
+Install 1.5.0 into the user's instance (ask first; they already ran 1.2.1 there, so its libraries are in). Next ideas: boarding a raider airship (idea 4, once the user has built a ship for it), sleep-blocking check with a real player, tunnelling under obsidian, a clean flank test on untouched ground.

@@ -10,6 +10,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.syncher.EntityDataAccessor;
@@ -28,6 +29,7 @@ import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
+import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.ai.goal.*;
 import net.minecraft.world.entity.ai.goal.target.HurtByTargetGoal;
 import net.minecraft.world.entity.ai.goal.target.NearestAttackableTargetGoal;
@@ -49,6 +51,7 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.component.FireworkExplosion;
 import net.minecraft.world.item.component.Fireworks;
+import net.minecraft.world.item.enchantment.Enchantments;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.*;
@@ -102,6 +105,8 @@ public class RaiderEntity extends Pillager {
     int boatUntil, boatsAt, landing; // board by; leader: next launch; ticks the boat has been grounded
     final List<Boat> fleet = new ArrayList<>(); // leader: boats he put in, taken back once the crossing is done
     int strikeAt = -1;            // artilleryman: his flare's shells land at this tick
+    boolean nemesis;              // the player base's named nemesis leader (RaidManager.claimNemesis); not saved, squads respawn him
+    int nemesisRank;
 
     public RaiderEntity(EntityType<? extends Pillager> type, Level level) {
         super(type, level);
@@ -158,9 +163,9 @@ public class RaiderEntity extends Pillager {
             @Override public boolean canUse() { return fights() && super.canUse(); }
             @Override public boolean canContinueToUse() { return fights() && super.canContinueToUse(); }
         }.setAlertOthers());
-        targetSelector.addGoal(2, new NearestAttackableTargetGoal<>(this, Player.class, true) {
+        targetSelector.addGoal(2, new NearestAttackableTargetGoal<>(this, Player.class, true, t -> !parley(t)) {
             @Override public boolean canUse() { return fights() && super.canUse(); }
-            @Override public boolean canContinueToUse() { return fights() && super.canContinueToUse(); }
+            @Override public boolean canContinueToUse() { return fights() && !parley(RaiderEntity.this.getTarget()) && super.canContinueToUse(); }
         });
         targetSelector.addGoal(3, new NearestAttackableTargetGoal<>(this, IronGolem.class, true) {
             @Override public boolean canUse() { return fights() && super.canUse(); }
@@ -168,8 +173,37 @@ public class RaiderEntity extends Pillager {
         });
     }
 
+    /** The garrison lets a player walk up to pay tribute (RaidManager.bringsTribute) until he hits them or goes for their chests. */
+    boolean parley(@Nullable LivingEntity target) {
+        Squad s = squad();
+        Base b = s == null || s.kind != Kind.GARRISON ? null : base(s);
+        return b != null && target instanceof Player p && RaidManager.bringsTribute(b, p)
+                && b.chests.stream().noneMatch(c -> c.closerToCenterThan(p.position(), 4));
+    }
+
+    /** Names him and kits him out for his rank: +10 health per rank, Sharpness = rank, a diamond chestplate from rank 2; his banner always drops. */
+    void makeNemesis(String title, int rank) {
+        int r = Math.min(rank, 4);
+        float was = getMaxHealth();
+        boolean fresh = !nemesis;
+        nemesis = true;
+        nemesisRank = rank;
+        setCustomName(Component.literal(title).withStyle(ChatFormatting.DARK_PURPLE));
+        setCustomNameVisible(true);
+        Objects.requireNonNull(getAttribute(Attributes.MAX_HEALTH)).setBaseValue(20 + 10 * r);
+        setHealth(fresh ? getMaxHealth() : getHealth() + getMaxHealth() - was); // a rank up mid-fight adds the new health on top
+        var ench = level().registryAccess().lookupOrThrow(Registries.ENCHANTMENT);
+        weapon.enchant(ench.getOrThrow(Enchantments.SHARPNESS), r); // keeps a higher level he already has
+        if (r >= 2) {
+            ItemStack chest = new ItemStack(Items.DIAMOND_CHESTPLATE);
+            chest.enchant(ench.getOrThrow(Enchantments.PROTECTION), r - 1);
+            setItemSlot(EquipmentSlot.CHEST, chest);
+        }
+        setDropChance(EquipmentSlot.HEAD, 2f); // over 1: always drops, undamaged
+    }
+
     boolean holdingRanged() { return isHolding(s -> s.getItem() instanceof CrossbowItem || s.getItem() instanceof BowItem); }
-    boolean fights() { return !retreating() && role() != Role.SCOUT; }
+    boolean fights() { return !retreating() && role() != Role.SCOUT && !(role() == Role.PILOT && isPassenger()); } // a pilot flies, he fights once on the ground
 
     /**
      * Every n ticks, for goal code. Goals are only checked (canUse) and ticked on every other tick, odd or even by entity id
@@ -391,11 +425,6 @@ public class RaiderEntity extends Pillager {
         b.setPaddleState(true, true);
     }
 
-    /** A player this raider can see within 64 blocks: what an artilleryman calls the shells onto. */
-    @Nullable Player spotted() {
-        return level().players().stream().filter(p -> !p.isSpectator() && distanceToSqr(p) < 64 * 64 && hasLineOfSight(p))
-                .min(Comparator.comparingDouble(this::distanceToSqr)).orElse(null);
-    }
 
     /** Artilleryman: fires a red flare; the shells land 3 s later on whoever he can see then. Kill him first and they never come. */
     void signal() {
@@ -413,8 +442,7 @@ public class RaiderEntity extends Pillager {
         strikeAt = -1;
         Squad s = squad();
         Base b = s == null ? null : base(s);
-        Player p = spotted();
-        if (b != null && !RaidManager.strike((ServerLevel) level(), b, RaidData.get(((ServerLevel) level()).getServer()).stage, p == null ? null : p.position()))
+        if (b != null && !RaidManager.strike((ServerLevel) level(), b, RaidData.get(((ServerLevel) level()).getServer()).stage, null))
             RaidManager.tell((ServerLevel) level(), b, "The artilleryman held his fire: his own men were too close to the target.", ChatFormatting.GOLD);
     }
 
@@ -427,6 +455,7 @@ public class RaiderEntity extends Pillager {
             case SCOUT -> watching ? special : weapon;
             case LEADER -> t == null ? weapon : unreachable || d > 7 * 7 ? bow : d < 5 * 5 ? weapon : hand; // keep the hand in between
             case ARTILLERYMAN -> t != null ? bow : watching ? special : weapon; // keeps his distance: never closes in with the sword
+            case PILOT -> t != null && d > 5 * 5 ? bow : weapon;
             case DEMOMAN -> tnt > 0 && d > 4 * 4 ? special : weapon;
             default -> weapon;
         };
@@ -473,9 +502,9 @@ public class RaiderEntity extends Pillager {
     @Override
     public void readAdditionalSaveData(CompoundTag tag) {
         super.readAdditionalSaveData(tag);
-        stale = tag.hasUUID("ropSquad");
-        if (stale) squadId = tag.getUUID("ropSquad");
         setRole(Role.of(tag.getInt("ropRole")));
+        stale = tag.hasUUID("ropSquad") || role() == Role.PILOT; // a pilot's ship is removed on restart, so is he
+        if (tag.hasUUID("ropSquad")) squadId = tag.getUUID("ropSquad");
     }
 
     /** Vanilla lets a mob with a target path off drops of up to ~16 blocks; chasing a player down from a hilltop camp, raiders fell to their deaths. */
@@ -486,11 +515,12 @@ public class RaiderEntity extends Pillager {
     protected void dropCustomDeathLoot(ServerLevel level, DamageSource source, boolean recentlyHit) {
         super.dropCustomDeathLoot(level, source, recentlyHit);
         for (ItemStack s : getInventory().removeAllItems()) spawnAtLocation(s); // stolen goods go back to the player
-        if (role() == Role.LEADER && source.getEntity() instanceof Player && getRandom().nextDouble() < Config.MAP_CHANCE.get()) {
+        if (role() == Role.LEADER && source.getEntity() instanceof Player && (nemesis || getRandom().nextDouble() < Config.MAP_CHANCE.get())) {
             Squad s = squad();
             Base b = s == null ? null : base(s);
             if (b != null && b.camp != null) spawnAtLocation(RaidManager.campMap(level, b.camp));
         }
+        if (nemesis && source.getEntity() instanceof Player) spawnAtLocation(new ItemStack(Items.EMERALD, 4 * nemesisRank)); // the bounty on him
     }
 
     /** Walks the squad toward its goal (the target on a raid, the camp on retreat). Followers keep to their leader. */
@@ -515,9 +545,26 @@ public class RaiderEntity extends Pillager {
                     || s.state == State.ATTACK && s.kind != Kind.SCOUT && distanceToSqr(dest.add(0, 0.5, 0)) > 12 * 12;
             if (!go) return null;
             RaiderEntity leader = role() == Role.LEADER || s.leaderless() ? null : leader(s);
-            if (leader != null && leader.distanceToSqr(RaiderEntity.this) < 40 * 40)
-                return distanceToSqr(leader) > 5 * 5 ? leader.position() : null; // fall in behind him
+            if (leader != null && leader.distanceToSqr(RaiderEntity.this) < 40 * 40) {
+                Vec3 slot = slot(s, leader, dest, Vec3.atBottomCenterOf(s.target != null ? s.target : b.home));
+                return distanceToSqr(slot) > 2 * 2 ? slot : null; // in line with him
+            }
             return dest;
+        }
+
+        /** His place in the leader's line: abreast of him across the way they go (facing the base once halted), artillerymen behind. */
+        private Vec3 slot(Squad s, RaiderEntity leader, Vec3 dest, Vec3 base) {
+            Vec3 h = dest.subtract(leader.position()).multiply(1, 0, 1);
+            if (h.lengthSqr() < 8 * 8) h = base.subtract(leader.position()).multiply(1, 0, 1);
+            if (h.lengthSqr() < 1e-4) return leader.position();
+            h = h.normalize();
+            if (role() == Role.ARTILLERYMAN) return leader.position().subtract(h.scale(5));
+            int k = 0; // every raider counts the same set in the same order, so each gets his own place
+            for (UUID u : s.live) {
+                if (u.equals(getUUID())) break;
+                if (((ServerLevel) level()).getEntity(u) instanceof RaiderEntity m && m.role() != Role.LEADER && m.role() != Role.ARTILLERYMAN) k++;
+            }
+            return leader.position().add(new Vec3(-h.z, 0, h.x).scale((k / 2 + 1) * 2.5 * (k % 2 == 0 ? 1 : -1)));
         }
 
         @Override public boolean canUse() { return target() != null; }
@@ -528,7 +575,7 @@ public class RaiderEntity extends Pillager {
             Vec3 t = target();
             if (t == null) return;
             if (--repath <= 0 || getNavigation().isDone()) {
-                repath = 40;
+                repath = role() == Role.LEADER || retreatOnly ? 40 : 15; // his place in line moves with the leader
                 Vec3 d = t.subtract(position()).multiply(1, 0, 1);
                 Vec3 wp = d.length() > 16 ? position().add(d.normalize().scale(16)) : t;
                 int y = level().getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, (int) Math.floor(wp.x), (int) Math.floor(wp.z));
@@ -890,7 +937,7 @@ public class RaiderEntity extends Pillager {
 
     /**
      * Spotting through a spyglass: a scout at his watch point, or an artilleryman on a raid hanging back 22 blocks on
-     * the camp side of the target (he fights only with the bow, from range).
+     * his squad's side of the target, behind its line while a ring closes (he fights only with the bow, from range).
      */
     class WatchGoal extends Goal {
         private Vec3 lookAt = Vec3.ZERO;
@@ -906,12 +953,14 @@ public class RaiderEntity extends Pillager {
                 return Vec3.atBottomCenterOf(level().getHeightmapPos(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, s.target));
             }
             if (role() != Role.ARTILLERYMAN || getTarget() != null || !s.kind.assault()) return null;
-            Vec3 dest = Vec3.atBottomCenterOf(RaidManager.dest(s, b));
+            Vec3 dest = Vec3.atBottomCenterOf(RaidManager.dest(s, b)), aim = Vec3.atBottomCenterOf(s.target != null ? s.target : b.home);
             if (s.state != State.ATTACK && !(s.state == State.OUTBOUND && distanceToSqr(dest) < 40 * 40)) return null;
-            lookAt = dest.add(0, 2, 0);
-            Vec3 back = Vec3.atBottomCenterOf(b.camp).subtract(dest).multiply(1, 0, 1).normalize();
-            for (int r : new int[]{22, 18, 26, 14, 30}) { // dry ground only
-                BlockPos p = level().getHeightmapPos(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, BlockPos.containing(dest.add(back.scale(r))));
+            lookAt = aim.add(0, 2, 0);
+            // on his squad's side of the base (its rally point, else the camp); behind the line while the ring closes
+            Vec3 from = Vec3.atBottomCenterOf(s.rally != null ? s.rally : b.camp), back = from.subtract(aim).multiply(1, 0, 1).normalize();
+            double hold = s.rally != null && !s.go ? RaidManager.horizontalDist(from, aim) + 8 : 22;
+            for (int k : new int[]{0, -4, 4, -8, 8}) { // dry ground only
+                BlockPos p = level().getHeightmapPos(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, BlockPos.containing(aim.add(back.scale(hold + k))));
                 if (level().getFluidState(p.below()).isEmpty()) return Vec3.atBottomCenterOf(p);
             }
             return null;

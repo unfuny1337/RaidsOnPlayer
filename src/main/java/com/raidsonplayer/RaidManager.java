@@ -9,6 +9,7 @@ import net.minecraft.advancements.AdvancementHolder;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.component.DataComponents;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
@@ -24,6 +25,7 @@ import net.minecraft.world.Difficulty;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.raid.Raid;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
@@ -196,7 +198,7 @@ public final class RaidManager {
             b.cannons.clear();
             b.gate = b.gateCrank = null;
             b.upgradeAt = b.emptySince = b.killed = 0;
-            b.hold = 0;
+            b.hold = b.demand = 0;
         } else d.bases.remove(b.id);
         boolean rootsLeft = main.camp != null || d.bases.values().stream().anyMatch(x -> main.id.equals(x.parent) && x.root);
         String msg = "You took the raider camp to the " + where + "! Its land is yours now.";
@@ -226,7 +228,7 @@ public final class RaidManager {
         for (ServerPlayer p : level.players()) {
             if (p.isSpectator() || level.random.nextDouble() >= HUNT_CHANCE) continue;
             Base b = landOf(d, p.position());
-            if (b != null && !empty(d, b) && d.squads.values().stream().noneMatch(s -> s.base.equals(b.id) && s.kind == Kind.HUNT)) startHunt(level, d, b, p, t);
+            if (b != null && !empty(d, b) && !bringsTribute(b, p) && d.squads.values().stream().noneMatch(s -> s.base.equals(b.id) && s.kind == Kind.HUNT)) startHunt(level, d, b, p, t);
         }
     }
 
@@ -370,11 +372,17 @@ public final class RaidManager {
         }
         boolean night = night(level);
         if (g != null && b.raid == null && b.waves == 0 && !night && pts >= b.nextRaid && canRaid(g) && raidable(level, b)) {
-            if (scouted(d, b) && level.random.nextDouble() < Config.FULL_DAY_CHANCE.get()) {
+            int refused = refuse(d, b);
+            if (scouted(d, b) && (refused >= 3 || level.random.nextDouble() < Config.FULL_DAY_CHANCE.get())) {
+                if (refused >= 3) {
+                    main(d, b).refusals = 0;
+                    tell(level, b, "Three times you refused the raiders their tribute. Now they come with everything they have!", ChatFormatting.DARK_RED);
+                }
                 b.nextRaid = pts + raidInterval(level, d, b);
                 startFullRaid(level, d, b, t);
-            } else startRaid(level, d, b, g, t);
+            } else startRaid(level, d, b, g, t, 2 * Math.min(refused, 3));
         }
+        if (!empty) tickTribute(level, d, b, pts);
 
         // Tower cannons shell the player base when it is within range, someone is home and the artilleryman is in camp.
         if (!b.cannons.isEmpty() && t >= b.nextCannon && horizontalDist(Vec3.atCenterOf(b.camp), Vec3.atCenterOf(b.home)) <= CANNON_RANGE
@@ -437,8 +445,11 @@ public final class RaidManager {
         return Math.abs(dx) > Math.abs(dz) ? (dx > 0 ? Direction.EAST : Direction.WEST) : (dz > 0 ? Direction.SOUTH : Direction.NORTH);
     }
 
-    /** Where a squad is headed while OUTBOUND or attacking: its own target, or the base home. */
-    static BlockPos dest(Squad s, Base b) { return s.target != null ? s.target : b.home; }
+    /** Where a squad is headed while OUTBOUND or attacking: its rally point while a ring closes (surround), else its own target or the base home. */
+    static BlockPos dest(Squad s, Base b) {
+        if (s.rally != null && !s.go && s.state == State.OUTBOUND) return s.rally;
+        return s.target != null ? s.target : b.home;
+    }
 
     /** Keeps the base area loaded until its entities are in memory, so old contraptions can be removed before a rebuild. */
     static boolean campLoaded(ServerLevel level, Base b) {
@@ -588,7 +599,8 @@ public final class RaidManager {
 
     static boolean canRaid(Squad g) { return raidParty(g).size() >= 2; }
 
-    static void startRaid(ServerLevel level, RaidData d, Base b, Squad g, long t) {
+    /** `extra`: more raiders join because their tribute wasn't paid (they come from elsewhere, not out of the garrison). */
+    static void startRaid(ServerLevel level, RaidData d, Base b, Squad g, long t, int extra) {
         List<Role> going = raidParty(g);
         Squad s = newSquad(b, Kind.RAID, State.OUTBOUND, g.pos, going, t);
         for (Role r : going) g.roles.remove(r);
@@ -601,13 +613,17 @@ public final class RaidManager {
                 s.live.add(e.getUUID());
             }
         }
+        s.roles.addAll(Collections.nCopies(extra, Role.RAIDER));
+        claimNemesis(level, d, b, s);
+        s.startCount = s.count();
         d.squads.put(s.id, s);
         setGate(level, b, true);
         b.raid = s.id;
         b.nextRaid = points(d, b) + raidInterval(level, d, b);
-        tell(level, b, going.size() + " raiders set out from their camp to the " + direction(b.home, b.camp) + "!", ChatFormatting.RED);
+        if (extra > 0) tell(level, b, "You didn't pay the raiders their tribute: " + extra + " more of them march with this raid.", ChatFormatting.DARK_RED);
+        tell(level, b, s.count() + " raiders set out from their camp to the " + direction(b.home, b.camp) + "!", ChatFormatting.RED);
         horn(level, b);
-        RaidsOnPlayer.LOG.info("Raid of {} {} launched from {} at base {}", going.size(), going, b.camp, b.home);
+        RaidsOnPlayer.LOG.info("Raid of {} {} launched from {} at base {}", s.count(), s.roles, b.camp, b.home);
     }
 
     static String direction(BlockPos from, BlockPos to) {
@@ -711,7 +727,7 @@ public final class RaidManager {
             return;
         }
         List<List<Role>> parties = Composition.night(d.stage, new Random(level.random.nextLong()), Config.demomanChance(d.stage));
-        int total = sendOut(d, target, Kind.NIGHT, parties, t);
+        int total = sendOut(level, d, target, Kind.NIGHT, parties, t);
         target.freshIntel = fresh; // demomen work better with a fresh report
         target.strikes = fresh && d.stage >= 3 ? (d.stage >= 4 ? 3 + level.random.nextInt(3) : 2 + level.random.nextInt(2)) : 0;
         target.nextStrike = Long.MAX_VALUE; // set when the first squad arrives
@@ -727,17 +743,33 @@ public final class RaidManager {
         RaidsOnPlayer.LOG.info("Night raid of {} in {} squads from {} on {} (fresh intel {})", total, parties.size(), target.camp, target.home, fresh);
     }
 
-    /** Squads march out of the camp side by side and fan out on arrival, hitting the home from several sides. Returns the head count. */
-    static int sendOut(RaidData d, Base b, Kind kind, List<List<Role>> parties, long t) {
+    static final int RALLY = 56; // blocks out from the home where the squads of a ring wait for each other
+
+    /**
+     * Squads march out of the camp side by side. Two or more close a ring: each takes its own side of the base, up to
+     * 120 degrees either way from the camp's, waits at a rally point RALLY blocks out and goes in with the others
+     * (surround). Returns the head count.
+     */
+    static int sendOut(ServerLevel level, RaidData d, Base b, Kind kind, List<List<Role>> parties, long t) {
         Vec3 camp = Vec3.atBottomCenterOf(b.camp), home = Vec3.atBottomCenterOf(b.home);
         Vec3 side = new Vec3(-(home.z - camp.z), 0, home.x - camp.x).normalize();
+        double toCamp = Math.atan2(camp.z - home.z, camp.x - home.x), step = parties.size() < 2 ? 0 : Math.toRadians(Math.min(120, 240.0 / (parties.size() - 1)));
         int total = 0;
+        Squad first = null;
         for (int i = 0; i < parties.size(); i++) {
-            double o = i - (parties.size() - 1) / 2.0;
+            double o = i - (parties.size() - 1) / 2.0, a = toCamp - o * step; // the squad leaving on the left takes the left
+            Vec3 from = new Vec3(Math.cos(a), 0, Math.sin(a));
             Squad s = newSquad(b, kind, State.OUTBOUND, camp.add(side.scale(o * 4)), parties.get(i), t);
-            s.target = BlockPos.containing(home.add(side.scale(o * 8)));
+            s.target = BlockPos.containing(home.add(from.scale(4))); // the near side of the home from where they come
+            if (parties.size() > 1) s.rally = BlockPos.containing(home.add(from.scale(RALLY)));
             d.squads.put(s.id, s);
             total += s.count();
+            if (first == null) first = s;
+        }
+        if (first != null) { // the nemesis leads the first squad (a leader joins for him if it has none)
+            total -= first.count();
+            claimNemesis(level, d, b, first);
+            total += first.count();
         }
         return total;
     }
@@ -750,9 +782,12 @@ public final class RaidManager {
      * Wave defense: stage + 1 waves from the camp, each sent once the last is beaten (or has fought 5 minutes); later waves
      * send more squads. Only against a base a scout has reported. Ignores dawn, so a night one can run into the day.
      */
-    static void startFullRaid(ServerLevel level, RaidData d, Base b, long t) {
+    static void startFullRaid(ServerLevel level, RaidData d, Base b, long t) { startFullRaid(level, d, b, t, 1); }
+
+    /** Starts at wave `first` (1-based; /rop full lets a test skip ahead). */
+    static void startFullRaid(ServerLevel level, RaidData d, Base b, long t, int first) {
         b.waves = Composition.waves(d.stage);
-        b.wave = 0;
+        b.wave = first - 1; // launchWave counts it up
         b.nextWave = t;
         b.freshIntel = true; // they know the layout: demomen carry more TNT and blow walls without waiting
         tell(level, b, "A full-sized raid! The raiders are coming at you in " + b.waves + " waves from the " + direction(b.home, b.camp) + "!", ChatFormatting.DARK_RED);
@@ -789,7 +824,9 @@ public final class RaidManager {
         Random r = new Random(level.random.nextLong());
         List<List<Role>> parties = new ArrayList<>();
         for (int i = Composition.waveSquads(d.stage, b.wave); i > 0; i--) parties.add(Composition.squad(d.stage, r, Config.demomanChance(d.stage)));
-        int total = sendOut(d, b, Kind.FULL, parties, t);
+        int total = sendOut(level, d, b, Kind.FULL, parties, t);
+        if (b.wave == b.waves && d.stage >= 3 && Airships.available() && Airships.launch(level, d, b, Vec3.atBottomCenterOf(b.home), t) != null)
+            tell(level, b, "A raider airship is coming with the final wave, from the " + direction(b.home, b.camp) + "! Shoot down its pilot!", ChatFormatting.DARK_RED);
         setGate(level, b, true);
         horn(level, b);
         tell(level, b, (b.wave == b.waves ? "Final wave! " : "Wave " + b.wave + " of " + b.waves + ": ") + total + " raiders in "
@@ -843,20 +880,17 @@ public final class RaidManager {
     }
 
     /**
-     * An airstrike is due. An artilleryman out on a raid (preferably one who can see a player) fires a flare and the
-     * shells follow on what he sees; with none in the field, the camp's guns fire blind on the home area. False (nothing
-     * fired) while raiders are too close to the target.
+     * An airstrike on the base is due. An artilleryman out on a raid fires a flare and the shells follow; with none in
+     * the field, the camp's guns fire on their own. False (nothing fired) while raiders are too close to the target.
      */
     static boolean callStrike(ServerLevel level, RaidData d, Base b) {
         RaiderEntity spotter = null;
         for (Squad s : d.squads.values())
             if (s.base.equals(b.id) && s.kind.assault() && s.state != State.RETREAT)
                 for (UUID u : s.live)
-                    if (level.getEntity(u) instanceof RaiderEntity e && e.role() == Role.ARTILLERYMAN && e.isAlive() && e.strikeAt < 0
-                            && (spotter == null || spotter.spotted() == null && e.spotted() != null)) spotter = e;
+                    if (spotter == null && level.getEntity(u) instanceof RaiderEntity e && e.role() == Role.ARTILLERYMAN && e.isAlive() && e.strikeAt < 0) spotter = e;
         if (spotter != null) {
-            Player p = spotter.spotted();
-            if (strikeAim(level, b, d.stage, p == null ? null : p.position()) == null) return false;
+            if (strikeAim(level, b, d.stage, null) == null) return false;
             spotter.signal();
             return true;
         }
@@ -874,19 +908,17 @@ public final class RaidManager {
     /** A raider within r (horizontally; shells fall from the sky, so ±48 in height) of `at`: the guns hold fire rather than hit their own. */
     static boolean friendsNear(ServerLevel level, Vec3 at, double r) {
         return !level.getEntitiesOfClass(RaiderEntity.class, AABB.ofSize(at, r * 2, 96, r * 2),
-                e -> e.isAlive() && horizontalDist(e.position(), at) < r).isEmpty();
+                e -> e.isAlive() && e.role() != Role.PILOT && horizontalDist(e.position(), at) < r).isEmpty(); // a pilot is up in his airship
     }
 
     static double strikeSpread(int stage) { return stage >= 4 ? 4 : 8; }
 
     /**
-     * Where an airstrike would aim: around `seen` (else a defender near home, else the home) with a fresh random offset,
-     * a few tries for a spot clear of raiders. Null if every try lands too close to them.
+     * Where an airstrike would aim: the base (around the home; `seen` instead for an airship sent at a spot) with a fresh
+     * random offset, a few tries for a spot clear of raiders. Null if every try lands too close to them.
      */
     @Nullable static Vec3 strikeAim(ServerLevel level, Base b, int stage, @Nullable Vec3 seen) {
-        List<ServerPlayer> targets = b.members.stream().map(u -> level.getServer().getPlayerList().getPlayer(u))
-                .filter(p -> p != null && p.level() == level && horizontalDist(p.position(), Vec3.atCenterOf(b.home)) < 64).toList();
-        Vec3 at = seen != null ? seen : targets.isEmpty() ? groundNear(level, b.home, 6) : targets.get(level.random.nextInt(targets.size())).position();
+        Vec3 at = seen != null ? seen : groundNear(level, b.home, 6);
         double off = stage >= 4 ? 4 : 10, clear = strikeSpread(stage) * 1.5 + BLAST; // shells scatter over a square: its corners
         for (int i = 0; i < 4; i++) {
             Vec3 aim = at.add(Mth.nextDouble(level.random, -off, off), 0, Mth.nextDouble(level.random, -off, off));
@@ -902,6 +934,151 @@ public final class RaidManager {
         int shells = stage >= 4 ? 3 + level.random.nextInt(2) : 2;
         Artillery.airstrike(level, aim, Vec3.atCenterOf(b.camp).subtract(aim), shells, strikeSpread(stage), level.random);
         return true;
+    }
+
+    // ---------------------------------------------------------------- nemesis
+
+    static final String[] NEMESIS_NAMES = {"Grisk", "Vorn", "Malgar", "Brakka", "Orsik", "Kragen", "Velm", "Durza", "Raska", "Morv", "Tarvek", "Ulgrim"};
+    static final String[] NEMESIS_TITLES = {"%s", "%s the Scarred", "%s the Dreaded", "Warlord %s"}; // by rank
+    static final String[] TAUNTS_ESCAPED = {"You let me walk away once. That was your mistake.", "I still carry the scar you gave me.", "Last time I ran. This time you will."};
+    static final String[] TAUNTS_KILLED = {"I killed you once. I'll do it again.", "Remember how you died last time?", "Back for more? Your bed won't save you."};
+
+    static String nemesisTitle(Base main) { return NEMESIS_TITLES[Mth.clamp(main.nemesisRank, 1, NEMESIS_TITLES.length) - 1].formatted(main.nemesis); }
+
+    static void nameNemesis(ServerLevel level, Base main) {
+        main.nemesis = NEMESIS_NAMES[level.random.nextInt(NEMESIS_NAMES.length)];
+        main.nemesisRank = main.nemesisKills = 0;
+    }
+
+    /** The player base's nemesis is out with one of its squads. */
+    static boolean nemesisOut(RaidData d, Base main) {
+        return d.squads.values().stream().anyMatch(o -> o.nemesis && d.bases.containsKey(o.base) && main(d, d.bases.get(o.base)) == main);
+    }
+
+    /**
+     * A raid on the players sets out: the nemesis leads `s` unless he is already out (a leader joins it for him if it has
+     * none). He never stays in a garrison, so he is free again once his squad is home or gone.
+     */
+    static void claimNemesis(ServerLevel level, RaidData d, Base b, Squad s) {
+        Base main = main(d, b);
+        if (main.nemesis == null || nemesisOut(d, main)) return;
+        if (!s.roles.contains(Role.LEADER)) {
+            s.roles.add(Role.LEADER);
+            s.startCount++;
+            s.hadLeader = true;
+        }
+        s.nemesis = true;
+        dressNemesis(level, main, s);
+        String[] taunts = main.nemesisKills > 0 ? TAUNTS_KILLED : TAUNTS_ESCAPED;
+        tell(level, b, nemesisTitle(main) + " is coming for you: \"" + taunts[level.random.nextInt(taunts.length)] + "\"", ChatFormatting.DARK_PURPLE);
+    }
+
+    /** Names and kits out the squad's nemesis leader if he is spawned (materialize does it when he appears). */
+    static void dressNemesis(ServerLevel level, Base main, Squad s) {
+        RaiderEntity pick = null;
+        for (UUID u : s.live) if (level.getEntity(u) instanceof RaiderEntity e && e.role() == Role.LEADER && (pick == null || e.nemesis)) pick = e;
+        if (pick != null) pick.makeNemesis(nemesisTitle(main), main.nemesisRank);
+    }
+
+    /**
+     * The leader of `s` beat the players: he got away from a fight, or his squad killed one of them. The nemesis moves
+     * up a rank (a new title, better gear); with no nemesis yet, this leader becomes it. One per player base.
+     */
+    static void nemesisWon(ServerLevel level, RaidData d, Base b, Squad s, boolean kill) {
+        Base main = main(d, b);
+        if (!s.nemesis) {
+            if (main.nemesis != null || s.kind == Kind.GARRISON || !s.roles.contains(Role.LEADER)) return;
+            nameNemesis(level, main);
+            s.nemesis = true;
+        }
+        if (kill) main.nemesisKills++;
+        if (s.ranked) return; // one rank per outing: dying again and again in one fight doesn't make him a warlord
+        s.ranked = true;
+        main.nemesisRank++;
+        String who = nemesisTitle(main);
+        tell(level, b, main.nemesisRank == 1
+                ? "The raider leader who " + (kill ? "killed you" : "got away") + " has a name: " + who + ". He'll be back."
+                : who + (kill ? " killed you" : " got away again") + ". He comes back stronger every time.", ChatFormatting.DARK_PURPLE);
+        dressNemesis(level, main, s);
+        RaidsOnPlayer.LOG.info("Nemesis {} of base {}: rank {}, {} kills", who, main.home, main.nemesisRank, main.nemesisKills);
+    }
+
+    /** A raider killed a player: his squad's leader beat them. */
+    public static void onPlayerKilled(RaiderEntity r) {
+        if (r.squadId == null || !(r.level() instanceof ServerLevel sl)) return;
+        RaidData d = RaidData.get(sl.getServer());
+        Squad s = d.squads.get(r.squadId);
+        Base b = s == null ? null : d.bases.get(s.base);
+        if (b != null) nemesisWon(sl, d, b, s, true);
+    }
+
+    // ---------------------------------------------------------------- tribute
+
+    /** What a camp demands before each day raid, by stage, in iron's worth. Stage 1 tents ask nothing. */
+    static final int[] DEMAND = {0, 0, 12, 24, 48};
+
+    /** Tribute value of a stack: iron ingot 1, gold ingot 2, emerald 3, diamond 8, their blocks 9 times that. */
+    static int tributeValue(ItemStack i) {
+        int v = i.is(Items.IRON_INGOT) ? 1 : i.is(Items.GOLD_INGOT) ? 2 : i.is(Items.EMERALD) ? 3 : i.is(Items.DIAMOND) ? 8
+                : i.is(Items.IRON_BLOCK) ? 9 : i.is(Items.GOLD_BLOCK) ? 18 : i.is(Items.EMERALD_BLOCK) ? 27 : i.is(Items.DIAMOND_BLOCK) ? 72 : 0;
+        return v * i.getCount();
+    }
+
+    /** Where tribute is dropped: the watchman's spot outside the gate. */
+    static Vec3 tributeSpot(Base b) { return Vec3.atBottomCenterOf(b.gate.relative(facing(b.camp, b.home), 2)); }
+
+    /** A player walking up with tribute in hand while the camp is owed some: its garrison and hunters leave him be. */
+    static boolean bringsTribute(Base b, Player p) { return b.demand > 0 && tributeValue(p.getMainHandItem()) > 0; }
+
+    static void demandTribute(ServerLevel level, RaidData d, Base b, long pts) {
+        b.demand = DEMAND[d.stage];
+        b.nextRaid = Math.max(b.nextRaid, pts + 12000); // half a day at least to pay
+        boolean first = d.bases.values().stream().noneMatch(o -> o != b && o.demand > 0 && main(d, o) == main(d, b)); // the rules once, not per camp
+        tell(level, b, first ? "The raiders of the camp to the " + direction(b.home, b.camp) + " demand tribute before they march: " + b.demand
+                + " iron's worth (a gold ingot counts 2, an emerald 3, a diamond 8). Hold it in your hand to walk up unharmed, and drop it at their gate."
+                + " Refuse, and more of them will come."
+                : "The camp to the " + direction(b.home, b.camp) + " wants " + b.demand + " iron's worth of tribute too.", ChatFormatting.GOLD);
+        RaidsOnPlayer.LOG.info("Camp {} demands {} tribute", b.camp, b.demand);
+    }
+
+    /**
+     * A day before its raid a camp (stage 2+) demands tribute. Valuables a player drops by its gate pay toward it; paid
+     * in full, the raid is put off a whole raid interval and past refusals are forgiven. Unpaid, the raid counts a refusal.
+     */
+    static void tickTribute(ServerLevel level, RaidData d, Base b, long pts) {
+        if (b.gate == null || DEMAND[d.stage] == 0) return;
+        if (b.demand == 0) {
+            if (b.raid == null && b.waves == 0 && pts >= b.nextRaid - 24000 && raidable(level, b)) demandTribute(level, d, b, pts);
+            return;
+        }
+        Vec3 at = tributeSpot(b);
+        int got = 0;
+        for (ItemEntity i : level.getEntitiesOfClass(ItemEntity.class, AABB.ofSize(at, 12, 8, 12), i -> i.getOwner() instanceof Player && tributeValue(i.getItem()) > 0)) {
+            got += tributeValue(i.getItem());
+            i.discard();
+        }
+        if (got == 0) return;
+        b.paid += got;
+        level.playSound(null, BlockPos.containing(at), SoundEvents.PILLAGER_CELEBRATE, SoundSource.HOSTILE, 1f, 1f);
+        if (b.paid < b.demand) {
+            tell(level, b, "The raiders take your tribute: " + b.paid + " of " + b.demand + ".", ChatFormatting.GOLD);
+            return;
+        }
+        long delay = raidInterval(level, d, b);
+        b.nextRaid = Math.max(b.nextRaid, pts) + delay;
+        b.paid -= b.demand; // anything over counts toward the next demand
+        b.demand = 0;
+        main(d, b).refusals = 0;
+        tell(level, b, "Tribute paid. The camp to the " + direction(b.home, b.camp) + " leaves you alone for "
+                + String.format(Locale.ROOT, "%.1f", (b.nextRaid - pts) / 24000.0) + " days.", ChatFormatting.GREEN);
+        RaidsOnPlayer.LOG.info("Tribute paid at {}: next raid in {} pts", b.camp, (b.nextRaid - pts) / 1200);
+    }
+
+    /** A raid sets out with the camp's tribute unpaid: one more refusal in a row, and what was paid toward it is gone. Returns the refusals, 0 if nothing was owed. */
+    static int refuse(RaidData d, Base b) {
+        if (b.demand == 0) return 0;
+        b.demand = b.paid = 0;
+        return ++main(d, b).refusals;
     }
 
     // ---------------------------------------------------------------- patrols
@@ -1008,6 +1185,8 @@ public final class RaidManager {
                 if (mat && losing(level, s)) {
                     enter(s, State.RETREAT, t);
                     tell(level, b, who + (nightRaid ? " was" : " were") + " beaten on the road and turns back!", ChatFormatting.GREEN);
+                } else if (s.rally != null && !s.go) {
+                    surround(level, d, b, s, t);
                 } else if (horizontalDist(s.pos, Vec3.atBottomCenterOf(dest(s, b))) < 24) {
                     if (mat) {
                         enter(s, State.ATTACK, t);
@@ -1038,6 +1217,25 @@ public final class RaidManager {
                 if (horizontalDist(s.pos, Vec3.atBottomCenterOf(b.camp)) < 12) returnHome(level, d, s, b);
             }
         }
+    }
+
+    /**
+     * A squad of a ring on its way to its rally point. Once every squad still on its way is in place (or one has waited
+     * a minute, or this one has marched 3 minutes), they all go in at once, the artillery hitting the base first.
+     */
+    static void surround(ServerLevel level, RaidData d, Base b, Squad s, long t) {
+        if (s.stagedAt == 0 && horizontalDist(s.pos, Vec3.atBottomCenterOf(s.rally)) < 12) {
+            s.stagedAt = t;
+            RaidsOnPlayer.LOG.info("{} squad in place at {} ({} of {} live)", s.kind, s.rally, s.live.size(), s.count());
+        }
+        List<Squad> ring = d.squads.values().stream().filter(o -> o.base.equals(b.id) && o.state == State.OUTBOUND && o.rally != null && !o.go).toList();
+        boolean closed = ring.stream().allMatch(o -> o.stagedAt > 0), waited = ring.stream().anyMatch(o -> o.stagedAt > 0 && t - o.stagedAt > 1200);
+        if (!closed && !waited && t - s.stateSince < 3600) return;
+        for (Squad o : ring) o.go = true;
+        String sides = String.join(", ", ring.stream().map(o -> direction(b.home, o.rally)).distinct().toList());
+        tell(level, b, "The raiders have surrounded your base (" + sides + ")! They attack from all sides!", ChatFormatting.DARK_RED);
+        RaidsOnPlayer.LOG.info("Ring of {} squads closed around {} ({}; all in place: {})", ring.size(), b.home, sides, closed);
+        if (d.stage >= 3 && artilleryAlive(d, b) && scouted(d, b)) callStrike(level, d, b); // the guns soften the base up as they go in
     }
 
     /** A night raid with a fresh scout report, or a full-sized raid: demomen carry more TNT and blow walls without waiting. */
@@ -1113,6 +1311,8 @@ public final class RaidManager {
     }
 
     static void returnHome(ServerLevel level, RaidData d, Squad s, Base b) {
+        if (s.kind.assault() && (s.count() < s.startCount || s.stolen > 0)) nemesisWon(level, d, b, s, false); // the leader got away from a fight
+        if (s.nemesis) s.roles.remove(Role.LEADER); // he doesn't join the garrison: he waits for the next raid on the players
         Squad g = d.squads.get(b.garrison);
         List<ItemStack> loot = new ArrayList<>(s.loot);
         s.loot.clear();
@@ -1120,7 +1320,8 @@ public final class RaidManager {
         for (UUID u : s.live)
             if (level.getEntity(u) instanceof RaiderEntity e) {
                 loot.addAll(e.getInventory().removeAllItems());
-                if (g != null && g.roles.size() < cap) {
+                if (e.nemesis) e.discard();
+                else if (g != null && g.roles.size() < cap) {
                     e.squadId = g.id;
                     e.restrictTo(b.camp, b.gate != null ? 8 : 10);
                     g.live.add(u);
@@ -1171,6 +1372,7 @@ public final class RaidManager {
             s.live.add(e.getUUID());
             spawned.add(e);
         }
+        if (s.nemesis) dressNemesis(level, main(d, b), s);
         // Loot carried while out of sight goes back into the carriers' pockets, so killing them returns it.
         for (int i = 0; !s.loot.isEmpty() && !spawned.isEmpty(); i++) {
             ItemStack rest = spawned.get(i % spawned.size()).getInventory().addItem(s.loot.remove(0));
@@ -1186,6 +1388,8 @@ public final class RaidManager {
             }
         s.live.clear();
     }
+
+    static final ResourceLocation AVIATORS_GOGGLES = ResourceLocation.parse("aeronautics:aviators_goggles");
 
     /** Material by stage: stone, iron, iron (diamond one time in four), diamond. */
     static Item tier(int stage, RandomSource r, Item stone, Item iron, Item diamond) {
@@ -1223,6 +1427,7 @@ public final class RaidManager {
                 e.special = new ItemStack(Items.SPYGLASS);
                 Objects.requireNonNull(e.getAttribute(Attributes.MOVEMENT_SPEED)).setBaseValue(0.42);
             }
+            case PILOT -> e.bow = new ItemStack(Items.BOW);
         }
         if (role == Role.LEADER && stage >= 4)
             e.weapon.enchant(level.registryAccess().lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(Enchantments.SHARPNESS), 2);
@@ -1231,6 +1436,8 @@ public final class RaidManager {
         if (role == Role.LEADER) {
             e.setItemSlot(EquipmentSlot.HEAD, Raid.getLeaderBannerInstance(level.registryAccess().lookupOrThrow(Registries.BANNER_PATTERN)));
             e.setDropChance(EquipmentSlot.HEAD, 0.25f);
+        } else if (role == Role.PILOT && BuiltInRegistries.ITEM.containsKey(AVIATORS_GOGGLES)) {
+            e.setItemSlot(EquipmentSlot.HEAD, new ItemStack(BuiltInRegistries.ITEM.get(AVIATORS_GOGGLES)));
         } else if (s >= 4) e.setItemSlot(EquipmentSlot.HEAD, new ItemStack(Items.DIAMOND_HELMET));
     }
 
@@ -1272,7 +1479,15 @@ public final class RaidManager {
             main(d, b).bonus += gain;
             if (s.kind == Kind.GARRISON || s.kind == Kind.RETAKE) b.killed += gain; // taken back if a player takes this camp
         }
-        if (s.kind == Kind.SCOUT) tell(sl, b, "You killed the raider scout before he could report back.", ChatFormatting.GREEN);
+        Base main = main(d, b);
+        if (e.nemesis && main.nemesis != null) { // dead for good: the next leader to beat the players takes his place
+            s.nemesis = false;
+            String who = nemesisTitle(main);
+            main.nemesis = null;
+            main.nemesisRank = main.nemesisKills = 0;
+            tell(sl, b, byPlayer ? "You killed " + who + "! The raiders have lost their champion." : who + " is dead.", ChatFormatting.GREEN);
+            RaidsOnPlayer.LOG.info("Nemesis {} of base {} died (by a player: {})", who, main.home, byPlayer);
+        } else if (s.kind == Kind.SCOUT) tell(sl, b, "You killed the raider scout before he could report back.", ChatFormatting.GREEN);
         else if (e.role() == Role.LEADER && s.kind != Kind.GARRISON && s.count() > 0)
             tell(sl, b, "A squad leader has fallen! His squad falters.", ChatFormatting.GREEN);
     }

@@ -64,6 +64,7 @@ public class RaidsOnPlayer {
         NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post e) -> {
             Cranks.tick();
             RaidManager.tick(e.getServer());
+            if (Airships.available()) Airships.tick(e.getServer());
         });
         NeoForge.EVENT_BUS.addListener((AdvancementEvent.AdvancementEarnEvent e) -> {
             if (e.getEntity() instanceof ServerPlayer p) RaidManager.updateStage(p.server, RaidData.get(p.server));
@@ -76,7 +77,7 @@ public class RaidsOnPlayer {
                         src.getDirectEntity() == null ? null : src.getDirectEntity().getTags(),
                         src.getEntity() == null ? null : src.getEntity().getType().toShortString());
                 RaidManager.onDeath(r, src.getEntity() instanceof Player);
-            }
+            } else if (e.getEntity() instanceof ServerPlayer && e.getSource().getEntity() instanceof RaiderEntity r) RaidManager.onPlayerKilled(r);
         });
         // Raider TNT (thrown or breaching) still hurts, but leaves blocks alone when raider griefing is off.
         NeoForge.EVENT_BUS.addListener((ExplosionEvent.Detonate e) -> {
@@ -93,7 +94,7 @@ public class RaidsOnPlayer {
         });
     }
 
-    /** /rop info | stage | raid | rebuild | fire | gate | airstrike | night [launch] | full | expand | scout | patrol | hunt  (ops only; for admins and testing) */
+    /** /rop info | stage | raid | rebuild | fire | gate | airstrike | night [launch] | full [wave] | expand | scout | patrol | hunt | airship | nemesis | tribute  (ops only; for admins and testing) */
     static void commands(RegisterCommandsEvent e) {
         e.getDispatcher().register(Commands.literal("rop").requires(s -> s.hasPermission(2))
                 .then(Commands.literal("info").executes(c -> info(c.getSource())))
@@ -144,11 +145,9 @@ public class RaidsOnPlayer {
                     RaidManager.launchNight(level, d, b, level.getGameTime());
                     return "Night raid launched with a scout report (it falls back at dawn, so use it at night).";
                 }))))
-                .then(Commands.literal("full").executes(c -> withBase(c.getSource(), (level, d, b) -> { // full-sized raid now, skipping the scout and the roll
-                    if (b.waves > 0) return "A full-sized raid is already on (wave " + b.wave + " of " + b.waves + ").";
-                    RaidManager.startFullRaid(level, d, b, level.getGameTime());
-                    return "Full-sized raid started.";
-                })))
+                // full [wave]: full-sized raid now, skipping the scout and the roll, optionally starting at a later wave
+                .then(Commands.literal("full").executes(c -> fullRaid(c.getSource(), 1))
+                        .then(Commands.argument("wave", IntegerArgumentType.integer(1)).executes(c -> fullRaid(c.getSource(), IntegerArgumentType.getInteger(c, "wave")))))
                 .then(Commands.literal("expand").executes(c -> withBase(c.getSource(), (level, d, b) -> { // another camp now, skipping the timer
                     if (RaidManager.camps(d, b) >= Config.MAX_CAMPS.get()) return "Already at maxCampsPerBase (" + Config.MAX_CAMPS.get() + ").";
                     RaidManager.expand(level, d, b, level.getGameTime());
@@ -163,6 +162,21 @@ public class RaidsOnPlayer {
                     if (b.patrol != null) return "A patrol is already out.";
                     RaidManager.startPatrol(level, d, b, level.getGameTime());
                     return "Patrol sent out.";
+                })))
+                .then(Commands.literal("airship").executes(c -> withBase(c.getSource(), (level, d, b) -> { // a raider airship flies at you now
+                    if (!Airships.available()) return "Airships need Create Aeronautics and the Aeronautics Toolgun.";
+                    Airships.Ship s = Airships.launch(level, d, b, c.getSource().getPosition(), level.getGameTime());
+                    return s == null ? "The airship could not be placed (see the log)." : "A raider airship is on its way to you (" + s.parts.size() + " parts).";
+                })))
+                .then(Commands.literal("nemesis").executes(c -> withBase(c.getSource(), (level, d, b) -> { // name one now, or rank him up
+                    if (b.nemesis == null) RaidManager.nameNemesis(level, b);
+                    b.nemesisRank++;
+                    return RaidManager.nemesisTitle(b) + " (rank " + b.nemesisRank + ") leads the next raid on you.";
+                })))
+                .then(Commands.literal("tribute").executes(c -> withBase(c.getSource(), (level, d, b) -> { // your camp demands tribute now
+                    if (b.gate == null || RaidManager.DEMAND[d.stage] == 0) return "Only stage 2+ camps (with a gate) demand tribute.";
+                    RaidManager.demandTribute(level, d, b, RaidManager.points(d, b));
+                    return "Tribute demanded; drop it within 6 blocks of " + net.minecraft.core.BlockPos.containing(RaidManager.tributeSpot(b)).toShortString() + ".";
                 })))
                 .then(Commands.literal("hunt").executes(c -> { // a hunting party from the camp whose land you stand on, skipping the roll
                     ServerPlayer p = c.getSource().getPlayerOrException();
@@ -183,6 +197,16 @@ public class RaidsOnPlayer {
         String msg = a.run(src.getServer().overworld(), data(src), b);
         src.sendSuccess(() -> Component.literal(msg), false);
         return 1;
+    }
+
+    static int fullRaid(CommandSourceStack src, int wave) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        return withBase(src, (level, d, b) -> {
+            if (b.waves > 0) return "A full-sized raid is already on (wave " + b.wave + " of " + b.waves + ").";
+            int waves = Composition.waves(d.stage);
+            if (wave > waves) return "Stage " + d.stage + " full-sized raids have " + waves + " waves.";
+            RaidManager.startFullRaid(level, d, b, level.getGameTime(), wave);
+            return "Full-sized raid started at wave " + wave + " of " + waves + ".";
+        });
     }
 
     static int gate(CommandSourceStack src, boolean open) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
@@ -207,7 +231,9 @@ public class RaidsOnPlayer {
                             + " pts, night raid " + (RaidManager.points(d, b) < b.nextNight && b.nightMisses == 0
                             ? "in " + (b.nextNight - RaidManager.points(d, b)) / 1200 + " pts" : (int) (RaidManager.nightChance(b) * 100) + "% each morning") : "")
                     .append(b.nightPlanned ? ", night raid planned" : "").append(b.freshIntel ? ", scouted" : "")
-                    .append(b.waves > 0 ? ", full raid wave " + b.wave + "/" + b.waves : "");
+                    .append(b.waves > 0 ? ", full raid wave " + b.wave + "/" + b.waves : "")
+                    .append(b.demand > 0 ? ", tribute " + b.paid + "/" + b.demand : "").append(b.refusals > 0 ? ", refused " + b.refusals + "x" : "")
+                    .append(b.nemesis != null ? ", nemesis " + RaidManager.nemesisTitle(b) + " (rank " + b.nemesisRank + ")" : "");
             for (Squad s : d.squads.values())
                 if (s.base.equals(b.id))
                     sb.append("\n    ").append(s.kind).append(' ').append(s.state).append(' ').append(s.roles).append(" at ")
